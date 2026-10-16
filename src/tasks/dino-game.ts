@@ -18,14 +18,15 @@
  * Dino Game: a minimal "dino run" game driven by the MediaPipe DecisionMaker
  * task (@mediapipe/tasks-decision).
  *
- * The model never sees distances. Whenever what's ahead of the dino changes,
- * the game describes it in words ("Low flying obstacle ahead: pterodactyl.")
- * and asks a Choice question: jump, duck or wait. The game code only handles
- * timing: it performs the chosen move when the obstacle gets close.
- *
- * The simulation can be paused and advanced one tick at a time so users can
- * inspect each decision. The model is shared with the Decision Maker page
- * (see decision-runtime.ts), so loading it on either page is enough.
+ * Supports two input modalities:
+ * - Scene Image (Vision): captures the full 800×220 game scene (dino on the
+ *   left, shaded near action zone, and all near & far obstacles on the track—
+ *   with no text labels) and compares it against encoded reference full-scene
+ *   prototypes (`options[].imageBytes`) in DecisionMaker so the model can
+ *   distinguish clear track vs. far obstacles (`wait`) vs. near ground/flying
+ *   obstacles (`jump` / `duck`), including multi-obstacle scenes.
+ * - Text State: describes what is ahead in words ("Low flying obstacle ahead:
+ *   pterodactyl.") and asks a Choice question: jump, duck, or wait.
  */
 
 import template from '../templates/dino-game.html?raw';
@@ -41,10 +42,8 @@ const WIDTH = 800;
 const HEIGHT = 220;
 const GROUND_Y = 180;
 
-const SCENE_CROP_W = 160;
-const SCENE_CROP_H = 100;
-const SCENE_CROP_GROUND_Y = 84;
-const SCENE_CROP_BIRD_BOTTOM = 24;
+/** Width of the shaded near lookahead action zone in front of the dino. */
+const FULL_SCENE_ZONE_W = 200;
 
 const DINO_X = 60;
 const DINO_W = 24;
@@ -66,18 +65,19 @@ const TICK_MS = 1000 / 60;
 export type InputMode = 'image' | 'text';
 
 /**
- * Time the model gets to answer: an obstacle comes into view this many ticks
- * before the dino must start its jump (14 ticks = ~233 ms for WebGPU vision,
- * 6 ticks = 100 ms for text).
+ * Time the model gets to answer: an obstacle comes into the near action zone
+ * this many ticks before the dino must start its jump (16 ticks = ~267 ms for
+ * WebGPU vision, 6 ticks = 100 ms for text).
  */
-const DECISION_BUDGET_TICKS_IMAGE = 14;
+const DECISION_BUDGET_TICKS_IMAGE = 16;
 const DECISION_BUDGET_TICKS_TEXT = 6;
+const FAR_MIN_MARGIN_TICKS = 12;
 
 function budgetTicksForMode(mode: InputMode): number {
   return mode === 'image' ? DECISION_BUDGET_TICKS_IMAGE : DECISION_BUDGET_TICKS_TEXT;
 }
 
-/** The model is asked about the next obstacle once it is this close (grows with speed). */
+/** The model is asked about a near obstacle once it is this close (grows with speed). */
 function lookDistance(speed: number, mode: InputMode = 'image'): number {
   return speed * (APEX_TIME + budgetTicksForMode(mode));
 }
@@ -91,7 +91,7 @@ const BIRD_BOTTOM = 22;
  * The Choice question asked about the scene text. This wording was picked
  * from a sweep with laya_s256 (13/13 correct on the game's sentences).
  */
-const DINO_QUESTION = {
+const DINO_TEXT_QUESTION = {
   instructions: 'What should the running dino do?',
   options: [
     { label: 'jump', description: 'an obstacle on the ground' },
@@ -126,6 +126,130 @@ const OBSTACLE_KINDS: ObstacleKind[] = [
   { name: 'pterodactyl', flying: true, width: 26, height: 16 },
 ];
 
+function findObstacleKind(name: string): ObstacleKind {
+  return OBSTACLE_KINDS.find((k) => k.name === name) ?? OBSTACLE_KINDS[1];
+}
+
+interface PrototypeObstacleSpec {
+  kindName: string;
+  x: number;
+}
+
+interface ScenePrototypeSpec {
+  id: string;
+  action: Action;
+  shortTitle: string;
+  obstacles: PrototypeObstacleSpec[];
+}
+
+/**
+ * Reference full-game scene prototypes (800×220) encoded as `options[].imageBytes`.
+ * Covers:
+ * - Clear track (`WAIT`)
+ * - Far ground or flying obstacle outside the near action zone (`WAIT`)
+ * - Near ground obstacle inside the action zone, alone or with a far obstacle (`JUMP`)
+ * - Near low-flying obstacle inside the action zone, alone or with a far obstacle (`DUCK`)
+ */
+const SCENE_PROTOTYPE_SPECS: ScenePrototypeSpec[] = [
+  { id: 'wait_clear', action: 'WAIT', shortTitle: 'clear track', obstacles: [] },
+  {
+    id: 'wait_far_cactus_mid',
+    action: 'WAIT',
+    shortTitle: 'far cactus (mid)',
+    obstacles: [{ kindName: 'cactus', x: 440 }],
+  },
+  {
+    id: 'wait_far_cactus_right',
+    action: 'WAIT',
+    shortTitle: 'far cactus (right)',
+    obstacles: [{ kindName: 'tall cactus', x: 620 }],
+  },
+  {
+    id: 'wait_far_bird_mid',
+    action: 'WAIT',
+    shortTitle: 'far bird (mid)',
+    obstacles: [{ kindName: 'bird', x: 440 }],
+  },
+  {
+    id: 'wait_far_bird_right',
+    action: 'WAIT',
+    shortTitle: 'far bird (right)',
+    obstacles: [{ kindName: 'pterodactyl', x: 620 }],
+  },
+  {
+    id: 'jump_near_cactus_entry',
+    action: 'JUMP',
+    shortTitle: 'near cactus',
+    obstacles: [{ kindName: 'cactus', x: 235 }],
+  },
+  {
+    id: 'jump_near_cactus_mid',
+    action: 'JUMP',
+    shortTitle: 'near cactus (close)',
+    obstacles: [{ kindName: 'cactus', x: 155 }],
+  },
+  {
+    id: 'jump_near_tall_cactus',
+    action: 'JUMP',
+    shortTitle: 'near tall cactus',
+    obstacles: [{ kindName: 'tall cactus', x: 230 }],
+  },
+  {
+    id: 'jump_near_two_cacti',
+    action: 'JUMP',
+    shortTitle: 'near cactus cluster',
+    obstacles: [{ kindName: 'two cacti', x: 220 }],
+  },
+  {
+    id: 'jump_near_cactus_far_cactus',
+    action: 'JUMP',
+    shortTitle: 'near cactus + far cactus',
+    obstacles: [
+      { kindName: 'cactus', x: 230 },
+      { kindName: 'tall cactus', x: 560 },
+    ],
+  },
+  {
+    id: 'jump_near_cactus_far_bird',
+    action: 'JUMP',
+    shortTitle: 'near cactus + far bird',
+    obstacles: [
+      { kindName: 'cactus', x: 230 },
+      { kindName: 'bird', x: 560 },
+    ],
+  },
+  {
+    id: 'duck_near_bird_entry',
+    action: 'DUCK',
+    shortTitle: 'near bird',
+    obstacles: [{ kindName: 'bird', x: 235 }],
+  },
+  {
+    id: 'duck_near_bird_mid',
+    action: 'DUCK',
+    shortTitle: 'near bird (close)',
+    obstacles: [{ kindName: 'bird', x: 155 }],
+  },
+  {
+    id: 'duck_near_bird_far_cactus',
+    action: 'DUCK',
+    shortTitle: 'near bird + far cactus',
+    obstacles: [
+      { kindName: 'bird', x: 230 },
+      { kindName: 'cactus', x: 560 },
+    ],
+  },
+  {
+    id: 'duck_near_bird_far_bird',
+    action: 'DUCK',
+    shortTitle: 'near bird + far bird',
+    obstacles: [
+      { kindName: 'bird', x: 230 },
+      { kindName: 'bird', x: 560 },
+    ],
+  },
+];
+
 interface Obstacle {
   id: number;
   kind: ObstacleKind;
@@ -151,17 +275,26 @@ interface World {
 interface Observation {
   onGround: boolean;
   speed: number;
-  /** The next obstacle, if it is within lookDistance(speed). */
+  /** The obstacle inside the near lookahead action zone, if any. */
   target: Obstacle | null;
-  distance: number | null; // gap between the dino and the target
+  distance: number | null; // gap between the dino and `target`
+  /** In image mode, a far obstacle on the track outside the near action zone. */
+  farTarget: Obstacle | null;
+  farDistance: number | null;
+  /** Key identifying the current decision scenario ('clear', 'far:<id>', 'near:<id>'). */
+  sceneKey: string;
 }
 
 interface Decision {
   action: Action;
   reason: string;
-  /** Obstacle id this decision is about (null = clear path). */
+  /** Near obstacle id this decision will act on (null = clear or far-only). */
   target: number | null;
-  /** Text sent to the model, if it was called. */
+  /** Scene key this decision was computed for ('clear', 'far:<id>', 'near:<id>'). */
+  sceneKey: string;
+  /** Prototype ID matched in image mode. */
+  matchedProtoId?: string;
+  /** Text sent to the model, if it was called in text mode. */
   prompt?: string;
   probabilities?: Record<Action, number>;
   inferenceTime?: number;
@@ -218,7 +351,7 @@ function createWorld(): World {
     ducking: false,
     obstacles: [],
     nextId: 1,
-    nextSpawnIn: 300,
+    nextSpawnIn: 40,
     scroll: 0,
     cleared: 0,
     gameOver: false,
@@ -226,14 +359,49 @@ function createWorld(): World {
 }
 
 function observe(world: World, mode: InputMode = 'image'): Observation {
-  const next = world.obstacles.find((o) => !o.passed);
+  const unpassed = world.obstacles.filter((o) => !o.passed && o.x < WIDTH - 8);
+  const next = unpassed[0] ?? null;
   const distance = next ? Math.max(0, next.x - (DINO_X + DINO_W)) : null;
-  const visible = next && distance! <= lookDistance(world.speed, mode);
+  const look = lookDistance(world.speed, mode);
+  const inNearZone = Boolean(next && distance !== null && distance <= look);
+
+  if (mode === 'text') {
+    const target = inNearZone ? next : null;
+    return {
+      onGround: world.dinoY === 0,
+      speed: world.speed,
+      target,
+      distance: target ? distance : null,
+      farTarget: null,
+      farDistance: null,
+      sceneKey: target ? `near:${target.id}` : 'clear',
+    };
+  }
+
+  if (inNearZone && next) {
+    const second = unpassed.find((o) => o.id !== next.id && o.x > DINO_X + DINO_W + look) ?? null;
+    const secondDist = second ? Math.max(0, second.x - (DINO_X + DINO_W)) : null;
+    return {
+      onGround: world.dinoY === 0,
+      speed: world.speed,
+      target: next,
+      distance,
+      farTarget: second,
+      farDistance: secondDist,
+      sceneKey: `near:${next.id}`,
+    };
+  }
+
+  const farCandidate = next && next.x <= WIDTH - 60 ? next : null;
+  const farDist = farCandidate ? Math.max(0, farCandidate.x - (DINO_X + DINO_W)) : null;
   return {
     onGround: world.dinoY === 0,
     speed: world.speed,
-    target: visible ? next : null,
-    distance: visible ? distance : null,
+    target: null,
+    distance: null,
+    farTarget: farCandidate,
+    farDistance: farDist,
+    sceneKey: farCandidate ? `far:${farCandidate.id}` : 'clear',
   };
 }
 
@@ -259,13 +427,14 @@ function stepWorld(world: World, input: { jump: boolean; duck: boolean }, rand: 
   }
   world.obstacles = world.obstacles.filter((o) => o.x + o.kind.width > -10);
 
-  // Spawn obstacles with a gap that is always long enough to recover in between.
+  // Spawn obstacles with a gap that allows recovery while frequently keeping
+  // both a near obstacle and a far obstacle visible on the 800px track.
   world.nextSpawnIn -= world.speed;
   if (world.nextSpawnIn <= 0) {
     const kind = OBSTACLE_KINDS[Math.floor(rand() * OBSTACLE_KINDS.length)];
     world.obstacles.push({ id: world.nextId++, kind, x: WIDTH, passed: false });
-    const minGap = world.speed * AIR_TIME * 1.3;
-    world.nextSpawnIn = minGap + rand() * 400;
+    const minGap = Math.max(330, world.speed * AIR_TIME * 1.55);
+    world.nextSpawnIn = minGap + rand() * 160;
   }
 
   world.speed = Math.min(MAX_SPEED, world.speed + ACCELERATION);
@@ -397,7 +566,7 @@ function drawCactus(ctx: CanvasRenderingContext2D, x: number, width: number, hei
 
 function drawObstacle(
   ctx: CanvasRenderingContext2D,
-  o: Obstacle,
+  o: { kind: ObstacleKind; x: number },
   tick: number,
   groundY = GROUND_Y,
   birdBottom = BIRD_BOTTOM,
@@ -429,28 +598,61 @@ function drawObstacle(
 }
 
 /**
- * Renders the 160x100 lookahead scene crop in front of the dino.
- * Contains the ground line and any obstacle inside the camera window at its
- * live horizontal position (moving right-to-left as the dino runs), with no
- * text labels, no UI chrome, and no dino.
+ * Renders the full 800×220 game scene (dino on the left, shaded near action
+ * zone in front of the dino, ground line across the full width, and all
+ * obstacles on the track—with no text overlays or HUD chrome).
  */
-function renderSceneCropCanvas(canvas: HTMLCanvasElement, w: World, mode: InputMode) {
+function renderFullSceneCanvas(
+  canvas: HTMLCanvasElement,
+  obstacles: Array<{ kind: ObstacleKind; x: number }>,
+  zoneW = FULL_SCENE_ZONE_W
+) {
   const sctx = canvas.getContext('2d')!;
   sctx.fillStyle = '#ffffff';
-  sctx.fillRect(0, 0, SCENE_CROP_W, SCENE_CROP_H);
+  sctx.fillRect(0, 0, WIDTH, HEIGHT);
 
-  // Clean horizontal ground line.
+  // Shaded near lookahead action zone in front of the dino.
+  const zoneX = DINO_X + DINO_W;
+  sctx.fillStyle = '#c8eaee';
+  sctx.fillRect(zoneX, 20, zoneW, GROUND_Y - 20);
+  sctx.fillStyle = '#007f8b';
+  sctx.fillRect(zoneX + zoneW, 20, 2, GROUND_Y - 20);
+
+  // Clean horizontal ground line across the full 800px scene.
   sctx.fillStyle = DINO_COLOR;
-  sctx.fillRect(0, SCENE_CROP_GROUND_Y, SCENE_CROP_W, 2);
+  sctx.fillRect(0, GROUND_Y, WIDTH, 2);
 
-  const camStart = DINO_X + DINO_W;
-  const camSpan = lookDistance(w.speed, mode) * 1.3;
-  for (const o of w.obstacles) {
-    const relX = o.x - camStart;
-    if (relX + o.kind.width < 0 || relX > camSpan) continue;
-    const drawX = Math.round((relX / camSpan) * (SCENE_CROP_W - o.kind.width - 16)) + 8;
-    drawObstacle(sctx, o, w.tick, SCENE_CROP_GROUND_Y, SCENE_CROP_BIRD_BOTTOM, drawX);
+  // Dino on the left.
+  drawSprite(sctx, [...DINO_BODY, ...DINO_LEGS.stand], DINO_X, GROUND_Y - DINO_H);
+
+  // All obstacles on the track (both near inside the action zone and far on the right).
+  for (const o of obstacles) {
+    if (o.x + o.kind.width < 0 || o.x >= WIDTH) continue;
+    drawObstacle(sctx, o, 0, GROUND_Y, BIRD_BOTTOM);
   }
+}
+
+/**
+ * Renders the live world onto the 800×220 full-scene canvas, normalizing
+ * horizontal distance relative to the current speed's lookDistance so the
+ * near action zone boundary always aligns with FULL_SCENE_ZONE_W.
+ */
+function renderFullSceneFromWorld(canvas: HTMLCanvasElement, w: World) {
+  const zoneX = DINO_X + DINO_W;
+  const baseLook = lookDistance(START_SPEED, 'image');
+  const currentLook = lookDistance(w.speed, 'image');
+  const scale = currentLook > 0 ? baseLook / currentLook : 1;
+
+  const mappedObstacles: Array<{ kind: ObstacleKind; x: number }> = [];
+  for (const o of w.obstacles) {
+    if (o.passed || o.x >= WIDTH) continue;
+    const relX = Math.max(0, o.x - zoneX);
+    const drawX = Math.round(zoneX + relX * scale);
+    if (drawX < WIDTH - 4) {
+      mappedObstacles.push({ kind: o.kind, x: drawX });
+    }
+  }
+  renderFullSceneCanvas(canvas, mappedObstacles, FULL_SCENE_ZONE_W);
 }
 
 async function canvasToJpegBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
@@ -482,7 +684,12 @@ class DinoGameTask {
   private world = createWorld();
   private rand = mulberry32(Date.now());
   /** The model's current decision about what's ahead; performed by the game when timing is right. */
-  private plan: Decision = { action: 'WAIT', reason: 'Press Play or Next Step.', target: null };
+  private plan: Decision = {
+    action: 'WAIT',
+    reason: 'Press Play or Next Step.',
+    target: null,
+    sceneKey: 'init',
+  };
   private modelCalls = 0;
   private inputMode: InputMode = 'image';
 
@@ -501,6 +708,12 @@ class DinoGameTask {
   private ctx!: CanvasRenderingContext2D;
   private sceneCanvas!: HTMLCanvasElement;
   private el: Record<string, HTMLElement> = {};
+  private protoCards = new Map<string, HTMLElement>();
+  private imageQuestionPromise?: Promise<{
+    instructions: string;
+    temperature: number;
+    options: Array<{ label: string; description: string; imageBytes: Uint8Array }>;
+  }>;
 
   constructor(private container: HTMLElement) {}
 
@@ -509,8 +722,8 @@ class DinoGameTask {
     this.container.querySelectorAll<HTMLElement>('[id]').forEach((node) => (this.el[node.id] = node));
     this.container.style.setProperty('--dm-width', `${WIDTH}px`);
     this.container.style.setProperty('--dm-aspect', `${WIDTH} / ${HEIGHT}`);
-    this.el['dm-question-text'].textContent = DINO_QUESTION.instructions;
-    this.el['dm-options'].innerHTML = DINO_QUESTION.options
+    this.el['dm-question-text'].textContent = DINO_TEXT_QUESTION.instructions;
+    this.el['dm-options'].innerHTML = DINO_TEXT_QUESTION.options
       .map((o) => `<li><b>${o.label}</b> — ${o.description}</li>`)
       .join('');
 
@@ -522,7 +735,9 @@ class DinoGameTask {
     this.ctx.scale(dpr, dpr);
 
     this.sceneCanvas = this.el['dm-scene-canvas'] as HTMLCanvasElement;
-    renderSceneCropCanvas(this.sceneCanvas, this.world, this.inputMode);
+    renderFullSceneFromWorld(this.sceneCanvas, this.world);
+    this.mountPrototypeGrid();
+    void this.ensureImageQuestion();
 
     this.el['dm-play'].addEventListener('click', () => this.setRunning(!this.running));
     this.el['dm-step'].addEventListener('click', () => this.step());
@@ -582,6 +797,73 @@ class DinoGameTask {
     }
   }
 
+  /** Renders miniature full-scene prototype cards in the Model Input section. */
+  private mountPrototypeGrid() {
+    const grid = this.el['dm-proto-grid'];
+    if (!grid) return;
+    grid.innerHTML = '';
+    this.protoCards.clear();
+
+    for (const spec of SCENE_PROTOTYPE_SPECS) {
+      const card = document.createElement('div');
+      card.className = 'dm-proto-card';
+      card.dataset.protoId = spec.id;
+
+      const thumb = document.createElement('canvas');
+      thumb.width = WIDTH;
+      thumb.height = HEIGHT;
+      thumb.className = 'dm-proto-thumb';
+      const obstacles = spec.obstacles.map((o) => ({ kind: findObstacleKind(o.kindName), x: o.x }));
+      renderFullSceneCanvas(thumb, obstacles, FULL_SCENE_ZONE_W);
+
+      const meta = document.createElement('div');
+      meta.className = 'dm-proto-meta';
+
+      const badge = document.createElement('span');
+      badge.className = `dm-proto-badge ${spec.action.toLowerCase()}`;
+      badge.textContent = spec.action;
+
+      const title = document.createElement('span');
+      title.className = 'dm-proto-title';
+      title.title = spec.shortTitle;
+      title.textContent = spec.shortTitle;
+
+      meta.append(badge, title);
+      card.append(thumb, meta);
+      grid.appendChild(card);
+      this.protoCards.set(spec.id, card);
+    }
+  }
+
+  /** Builds and caches the multimodal ChoiceQuestion with encoded full-scene prototypes. */
+  private ensureImageQuestion() {
+    if (!this.imageQuestionPromise) {
+      this.imageQuestionPromise = (async () => {
+        const offscreen = document.createElement('canvas');
+        offscreen.width = WIDTH;
+        offscreen.height = HEIGHT;
+
+        const options: Array<{ label: string; description: string; imageBytes: Uint8Array }> = [];
+        for (const spec of SCENE_PROTOTYPE_SPECS) {
+          const obstacles = spec.obstacles.map((o) => ({ kind: findObstacleKind(o.kindName), x: o.x }));
+          renderFullSceneCanvas(offscreen, obstacles, FULL_SCENE_ZONE_W);
+          const imageBytes = await canvasToJpegBytes(offscreen);
+          options.push({
+            label: spec.id,
+            description: '',
+            imageBytes,
+          });
+        }
+        return {
+          instructions: DINO_TEXT_QUESTION.instructions,
+          temperature: 0.01,
+          options,
+        };
+      })();
+    }
+    return this.imageQuestionPromise;
+  }
+
   private isLoadedModelVisionCapable(): boolean {
     if (!decisionRuntime.ready) return false;
     if (decisionRuntime.customModel) return true;
@@ -616,12 +898,12 @@ class DinoGameTask {
     this.el['dm-mode-text']?.classList.toggle('active', !isImage);
     if (this.el['dm-help']) {
       this.el['dm-help'].innerHTML = isImage
-        ? 'When something new enters the lookahead zone, the game captures a <b>160×100 image crop</b> of the scene ahead (with no text labels) and sends those pixels to <code>DecisionMaker</code> to choose: <b>jump</b>, <b>duck</b>, or <b>wait</b>.'
+        ? 'The game captures the <b>full 800×220 game scene</b> (dino on the left, shaded near action zone, and all near &amp; far obstacles on the track—with no text labels) and compares those pixels against encoded reference full-scene prototypes in <code>DecisionMaker</code> to choose: <b>jump</b>, <b>duck</b>, or <b>wait</b>.'
         : 'The model never sees the game. When something new comes into view, it gets a one-line text description and makes a Choice: <b>jump</b>, <b>duck</b>, or <b>wait</b>.';
     }
     if (this.el['dm-input-label']) {
       this.el['dm-input-label'].textContent = isImage
-        ? 'Model input (160×100 scene image crop)'
+        ? 'Model input (full 800×220 game scene)'
         : 'Model input (scene text description)';
     }
     if (this.el['dm-input-badge']) {
@@ -629,6 +911,12 @@ class DinoGameTask {
     }
     if (this.el['dm-scene-preview-wrap']) {
       this.el['dm-scene-preview-wrap'].style.display = isImage ? 'flex' : 'none';
+    }
+    if (this.el['dm-proto-section']) {
+      this.el['dm-proto-section'].style.display = isImage ? 'block' : 'none';
+    }
+    if (this.el['dm-options']) {
+      this.el['dm-options'].style.display = isImage ? 'none' : 'block';
     }
     if (this.el['dm-prompt']) {
       this.el['dm-prompt'].style.display = isImage ? 'none' : 'block';
@@ -649,45 +937,103 @@ class DinoGameTask {
   // Model (shared runtime, runs in a worker)
   // -------------------------------------------------------------------------
 
-  /** True if what's ahead changed since the last decision (or it is still pending). */
-  private needsDecision(obs: Observation) {
-    return this.plan.target !== (obs.target?.id ?? null) || (this.plan.thinking === true && !this.inFlight);
+  /**
+   * True if the scene state changed since the last decision (or a decision is
+   * still pending). In Scene Image mode, we evaluate:
+   * - 'clear' when no obstacles are on screen,
+   * - 'far:<id>' when an obstacle is on the far track (and the dino is on the
+   *   ground with plenty of margin before the near action zone), and
+   * - 'near:<id>' as soon as an obstacle enters the near lookahead action zone.
+   */
+  private needsDecision(obs: Observation): boolean {
+    if (this.plan.thinking && !this.inFlight) return true;
+    if (this.plan.sceneKey === obs.sceneKey) return false;
+
+    if (this.inputMode === 'image' && obs.sceneKey.startsWith('far:')) {
+      if (!obs.onGround || obs.farDistance === null) return false;
+      const minFarDist =
+        lookDistance(obs.speed, this.inputMode) + obs.speed * (DECISION_BUDGET_TICKS_IMAGE + FAR_MIN_MARGIN_TICKS);
+      return obs.farDistance >= minFarDist;
+    }
+    return true;
   }
 
-  /** Asks the model about the scene: one Choice call (either image crop or text state). */
+  /** Asks the model about the scene: one Choice call (either full-scene image or text state). */
   private async modelDecide(obs: Observation): Promise<Decision> {
     const target = obs.target?.id ?? null;
-    if (!decisionRuntime.ready) return { action: 'WAIT', reason: 'Model not ready.', target };
+    const sceneKey = obs.sceneKey;
+    if (!decisionRuntime.ready) return { action: 'WAIT', reason: 'Model not ready.', target, sceneKey };
 
     if (this.inputMode === 'image') {
       if (!this.isLoadedModelVisionCapable()) {
-        return { action: 'WAIT', reason: 'Select and load a vision-capable model (440M or 740M).', target };
+        return {
+          action: 'WAIT',
+          reason: 'Select and load a vision-capable model (440M or 740M).',
+          target,
+          sceneKey,
+        };
       }
-      renderSceneCropCanvas(this.sceneCanvas, this.world, this.inputMode);
-      const imageBytes = await canvasToJpegBytes(this.sceneCanvas);
+      renderFullSceneFromWorld(this.sceneCanvas, this.world);
+      const [imageBytes, imageQuestion] = await Promise.all([
+        canvasToJpegBytes(this.sceneCanvas),
+        this.ensureImageQuestion(),
+      ]);
       if (this.el['dm-scene-caption']) {
-        this.el['dm-scene-caption'].textContent = `160×100 JPEG · ${(imageBytes.byteLength / 1024).toFixed(1)} KB`;
+        this.el['dm-scene-caption'].textContent =
+          `800×220 full-scene JPEG · ${(imageBytes.byteLength / 1024).toFixed(1)} KB`;
       }
       this.modelCalls++;
-      const msg = await decisionRuntime.ask({ imageBytes }, 'choice', DINO_QUESTION);
+      const msg = await decisionRuntime.ask({ imageBytes }, 'choice', imageQuestion);
       if (msg.type !== 'DECIDE_RESULT') {
-        return { action: 'WAIT', reason: `Model error: ${msg.error}`, target };
+        return { action: 'WAIT', reason: `Model error: ${msg.error}`, target, sceneKey };
       }
       const { selectedKey, probabilities } = msg.result as {
         selectedKey: string;
         probabilities: Record<string, number>;
       };
       this.inferenceTimer.record(msg.inferenceTime, 'GPU');
-      const action = (selectedKey?.toUpperCase() as Action) ?? 'WAIT';
-      const probs = Object.fromEntries(ACTIONS.map((a) => [a, probabilities?.[a.toLowerCase()] ?? 0])) as Record<
-        Action,
-        number
-      >;
-      const what = obs.target ? `“${obs.target.kind.name}” sprite` : 'empty ground';
+
+      // Aggregate prototype probabilities by action class using max-pooling so
+      // classes with more reference prototypes are not artificially boosted.
+      const maxByAction: Record<Action, number> = { JUMP: 0, DUCK: 0, WAIT: 0 };
+      let bestSpec = SCENE_PROTOTYPE_SPECS[0];
+      let bestRawProb = -1;
+      for (const spec of SCENE_PROTOTYPE_SPECS) {
+        const p = probabilities?.[spec.id] ?? 0;
+        if (p > maxByAction[spec.action]) {
+          maxByAction[spec.action] = p;
+        }
+        if (p > bestRawProb || spec.id === selectedKey) {
+          if (p > bestRawProb) {
+            bestRawProb = p;
+            bestSpec = spec;
+          }
+        }
+      }
+      const matchedSpec = SCENE_PROTOTYPE_SPECS.find((s) => s.id === selectedKey) ?? bestSpec;
+      const action: Action = matchedSpec.action;
+      const sumMax = maxByAction.JUMP + maxByAction.DUCK + maxByAction.WAIT || 1;
+      const probs: Record<Action, number> = {
+        JUMP: maxByAction.JUMP / sumMax,
+        DUCK: maxByAction.DUCK / sumMax,
+        WAIT: maxByAction.WAIT / sumMax,
+      };
+
+      let sceneDesc = 'clear track';
+      if (obs.target && obs.farTarget) {
+        sceneDesc = `near ${obs.target.kind.name} in action zone + far ${obs.farTarget.kind.name} ahead`;
+      } else if (obs.target) {
+        sceneDesc = `near ${obs.target.kind.name} in action zone`;
+      } else if (obs.farTarget) {
+        sceneDesc = `far ${obs.farTarget.kind.name} outside action zone`;
+      }
+
       return {
-        action: ACTIONS.includes(action) ? action : 'WAIT',
-        reason: `Model saw ${what} in scene image → ${selectedKey} (${Math.round(probs[action] * 100)}%).`,
+        action,
+        reason: `Scene: ${sceneDesc} → matched “${matchedSpec.shortTitle}” → ${action.toLowerCase()} (${Math.round(probs[action] * 100)}%).`,
         target,
+        sceneKey,
+        matchedProtoId: matchedSpec.id,
         probabilities: probs,
         inferenceTime: msg.inferenceTime,
       };
@@ -695,8 +1041,10 @@ class DinoGameTask {
 
     const prompt = describe(obs);
     this.modelCalls++;
-    const msg = await decisionRuntime.ask(prompt, 'choice', DINO_QUESTION);
-    if (msg.type !== 'DECIDE_RESULT') return { action: 'WAIT', reason: `Model error: ${msg.error}`, target, prompt };
+    const msg = await decisionRuntime.ask(prompt, 'choice', DINO_TEXT_QUESTION);
+    if (msg.type !== 'DECIDE_RESULT') {
+      return { action: 'WAIT', reason: `Model error: ${msg.error}`, target, sceneKey, prompt };
+    }
 
     const { selectedKey, probabilities } = msg.result as {
       selectedKey: string;
@@ -713,6 +1061,7 @@ class DinoGameTask {
       action: ACTIONS.includes(action) ? action : 'WAIT',
       reason: `Model read ${what} → ${selectedKey} (${Math.round(probs[action] * 100)}%).`,
       target,
+      sceneKey,
       prompt,
       probabilities: probs,
       inferenceTime: msg.inferenceTime,
@@ -721,8 +1070,8 @@ class DinoGameTask {
 
   /**
    * While playing, ask the model in the background so the game keeps its speed.
-   * An obstacle comes into view only DECISION_BUDGET_TICKS before the dino has
-   * to act, so the model must answer within that budget (~100 ms).
+   * An obstacle enters the near action zone DECISION_BUDGET_TICKS before the
+   * dino has to act, so the model answers within that budget.
    */
   private askModelInBackground(obs: Observation) {
     this.inFlight = true;
@@ -730,8 +1079,8 @@ class DinoGameTask {
     this.modelDecide(obs).then((decision) => {
       this.inFlight = false;
       if (epoch !== this.epoch) return;
-      // Ignore answers about something that's no longer ahead.
-      if (decision.target !== this.plan.target) return;
+      // Ignore answers about a scene state that is no longer current.
+      if (decision.sceneKey !== this.plan.sceneKey) return;
       this.plan = decision;
       if (this.running && this.pauseOnDecision && decision.action !== 'WAIT') this.setRunning(false);
       this.render();
@@ -806,14 +1155,16 @@ class DinoGameTask {
     const obs = observe(this.world, this.inputMode);
     if (this.needsDecision(obs)) {
       const target = obs.target?.id ?? null;
-      if (target !== this.plan.target) {
+      if (obs.sceneKey !== this.plan.sceneKey) {
         if (this.inputMode === 'image') {
-          renderSceneCropCanvas(this.sceneCanvas, this.world, this.inputMode);
+          renderFullSceneFromWorld(this.sceneCanvas, this.world);
         }
         this.plan = {
           action: 'WAIT',
-          reason: this.inputMode === 'image' ? 'Model is inspecting scene image…' : 'Model is reading what’s ahead…',
+          reason:
+            this.inputMode === 'image' ? 'Model is inspecting full scene image…' : 'Model is reading what’s ahead…',
           target,
+          sceneKey: obs.sceneKey,
           thinking: true,
         };
       }
@@ -847,7 +1198,7 @@ class DinoGameTask {
     this.world = createWorld();
     this.rand = mulberry32(Date.now());
     this.modelCalls = 0;
-    renderSceneCropCanvas(this.sceneCanvas, this.world, this.inputMode);
+    renderFullSceneFromWorld(this.sceneCanvas, this.world);
     await this.refreshPlan();
   }
 
@@ -889,6 +1240,10 @@ class DinoGameTask {
     }
     if (d.prompt) this.el['dm-prompt'].textContent = d.prompt;
 
+    for (const [id, card] of this.protoCards.entries()) {
+      card.classList.toggle('matched', !d.thinking && d.matchedProtoId === id);
+    }
+
     if (decisionRuntime.ready) {
       this.el['status-message'].textContent = over ? 'Game over' : this.running ? 'Running' : 'Paused';
     }
@@ -902,12 +1257,13 @@ class DinoGameTask {
 
     ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
-    // The zone the model "looks" at: obstacles in here are captured/described to it.
+    // Near action zone in front of the dino.
     const look = lookDistance(w.speed, this.inputMode);
-    const zoneW = this.inputMode === 'image' ? look * 1.3 : look;
-    ctx.fillStyle = 'rgba(0, 127, 139, 0.06)';
+    const zoneW =
+      this.inputMode === 'image' ? Math.round((FULL_SCENE_ZONE_W / lookDistance(START_SPEED, 'image')) * look) : look;
+    ctx.fillStyle = 'rgba(0, 127, 139, 0.10)';
     ctx.fillRect(DINO_X + DINO_W, 20, zoneW, GROUND_Y - 20);
-    ctx.strokeStyle = 'rgba(0, 127, 139, 0.5)';
+    ctx.strokeStyle = 'rgba(0, 127, 139, 0.65)';
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
     ctx.moveTo(DINO_X + DINO_W + zoneW, 20);
@@ -919,35 +1275,44 @@ class DinoGameTask {
     const budgetMs = Math.round((budgetTicksForMode(this.inputMode) * TICK_MS) / this.simSpeed);
     ctx.textAlign = 'right';
     ctx.fillText(
-      this.inputMode === 'image' ? 'model camera looks here (160×100 crop)' : 'model looks here',
-      DINO_X + DINO_W + zoneW - 4,
+      this.inputMode === 'image' ? 'near action zone (jump / duck)' : 'model looks here',
+      DINO_X + DINO_W + zoneW - 6,
       32
     );
-    ctx.fillText(`${budgetMs} ms to decide`, DINO_X + DINO_W + zoneW - 4, 45);
+    ctx.fillText(`${budgetMs} ms to decide`, DINO_X + DINO_W + zoneW - 6, 45);
+
+    if (this.inputMode === 'image') {
+      ctx.fillStyle = '#5f6368';
+      ctx.textAlign = 'left';
+      ctx.fillText('far track (wait until obstacle enters action zone) →', DINO_X + DINO_W + zoneW + 10, 32);
+    }
     ctx.textAlign = 'left';
 
-    if (this.sceneCanvas) {
-      renderSceneCropCanvas(this.sceneCanvas, w, this.inputMode);
+    if (this.sceneCanvas && !this.running) {
+      renderFullSceneFromWorld(this.sceneCanvas, w);
     }
 
     drawGround(ctx, w.scroll);
 
-    // Obstacles with their text label; the current target also shows the model's choice.
+    // Obstacles: show the model's decision on the active near or far target.
     for (const o of w.obstacles) {
       drawObstacle(ctx, o, w.tick);
       const top = GROUND_Y - (o.kind.flying ? BIRD_BOTTOM : 0) - o.kind.height;
-      const isTarget = obs.target?.id === o.id && this.plan.target === o.id;
-      const label =
-        this.inputMode === 'image'
-          ? isTarget && !this.plan.thinking
-            ? `→ ${this.plan.action}`
-            : ''
-          : isTarget && !this.plan.thinking
-            ? `${o.kind.name} → ${this.plan.action}`
-            : o.kind.name;
+      const isNearTarget = obs.target?.id === o.id && this.plan.sceneKey === `near:${o.id}`;
+      const isFarTarget = !obs.target && obs.farTarget?.id === o.id && this.plan.sceneKey === `far:${o.id}`;
+      let label = '';
+      if (this.inputMode === 'image') {
+        if (isNearTarget && !this.plan.thinking) {
+          label = `near → ${this.plan.action}`;
+        } else if (isFarTarget && !this.plan.thinking) {
+          label = `far → ${this.plan.action}`;
+        }
+      } else {
+        label = isNearTarget && !this.plan.thinking ? `${o.kind.name} → ${this.plan.action}` : o.kind.name;
+      }
       if (label) {
-        ctx.font = `${isTarget ? 'bold ' : ''}11px Roboto, sans-serif`;
-        ctx.fillStyle = isTarget ? '#007f8b' : '#5f6368';
+        ctx.font = `${isNearTarget || isFarTarget ? 'bold ' : ''}11px Roboto, sans-serif`;
+        ctx.fillStyle = isNearTarget ? '#007f8b' : '#5f6368';
         ctx.textAlign = 'center';
         ctx.fillText(label, o.x + o.kind.width / 2, top - 6);
         ctx.textAlign = 'left';

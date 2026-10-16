@@ -65,9 +65,9 @@
     <div class="viewport">
       <div id="dm-game-view" class="dm-view">
         <p id="dm-help" class="dm-help">
-          When something new enters the lookahead zone, the game captures a <b>160×100 image crop</b> of the scene ahead
-          (with no text labels) and sends those pixels to <code>DecisionMaker</code> to choose: <b>jump</b>,
-          <b>duck</b>, or <b>wait</b>.
+          The game captures the <b>full 800×220 game scene</b> (dino on the left, shaded near action zone, and all near
+          &amp; far obstacles on the track—with no text labels) and compares those pixels against encoded reference
+          full-scene prototypes in <code>DecisionMaker</code> to choose: <b>jump</b>, <b>duck</b>, or <b>wait</b>.
         </p>
         <canvas id="dm-canvas" class="dm-canvas"></canvas>
 
@@ -103,19 +103,27 @@
 
           <div class="dm-card">
             <div class="dm-input-header">
-              <div class="dm-label" id="dm-input-label">Model input (160×100 scene image crop)</div>
+              <div class="dm-label" id="dm-input-label">Model input (full 800×220 game scene)</div>
               <span id="dm-input-badge" class="dm-input-badge">Vision · { imageBytes }</span>
             </div>
             <div class="dm-input-body">
               <div id="dm-scene-preview-wrap" class="dm-scene-preview-wrap">
-                <canvas id="dm-scene-canvas" width="160" height="100" class="dm-scene-canvas"></canvas>
-                <div id="dm-scene-caption" class="dm-scene-caption">Lookahead crop sent to model</div>
+                <canvas id="dm-scene-canvas" width="800" height="220" class="dm-scene-canvas"></canvas>
+                <div id="dm-scene-caption" class="dm-scene-caption">
+                  Full 800×220 scene sent to model (dino + near action zone + far track)
+                </div>
               </div>
               <div class="dm-input-details">
                 <div id="dm-prompt" class="dm-prompt" style="display: none">(model not called yet)</div>
                 <div class="dm-question">
                   <span class="dm-label">Choice</span> <span id="dm-question-text"></span>
-                  <ul id="dm-options" class="dm-options"></ul>
+                  <ul id="dm-options" class="dm-options" style="display: none"></ul>
+                  <div id="dm-proto-section" class="dm-proto-section">
+                    <div class="dm-proto-subtitle">
+                      Encoded reference full-scene options (<code>options[].imageBytes</code>):
+                    </div>
+                    <div id="dm-proto-grid" class="dm-proto-grid"></div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -390,20 +398,21 @@
     }
     .dm-input-body {
       display: flex;
-      align-items: flex-start;
-      gap: 16px;
-      flex-wrap: wrap;
+      flex-direction: column;
+      gap: 12px;
     }
     .dm-scene-preview-wrap {
       display: flex;
       flex-direction: column;
-      align-items: center;
+      align-items: flex-start;
       gap: 4px;
-      flex-shrink: 0;
+      width: 100%;
     }
     .dm-scene-canvas {
-      width: 160px;
-      height: 100px;
+      width: 100%;
+      max-width: 560px;
+      aspect-ratio: 800 / 220;
+      height: auto;
       border: 1.5px solid #007f8b;
       border-radius: 6px;
       background: #fff;
@@ -412,12 +421,82 @@
     }
     .dm-scene-caption {
       font-family: 'Roboto Mono', monospace;
-      font-size: 0.7rem;
+      font-size: 0.72rem;
       color: var(--text-secondary);
     }
     .dm-input-details {
+      width: 100%;
+    }
+    .dm-proto-section {
+      margin-top: 8px;
+    }
+    .dm-proto-subtitle {
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+    .dm-proto-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+      gap: 6px;
+    }
+    .dm-proto-card {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 5px 6px;
+      border: 1px solid var(--border-color);
+      border-radius: 5px;
+      background: #fafafa;
+      transition:
+        border-color 0.15s,
+        background 0.15s,
+        box-shadow 0.15s;
+    }
+    .dm-proto-card.matched {
+      border-color: #007f8b;
+      background: rgba(0, 127, 139, 0.08);
+      box-shadow: 0 0 0 1px #007f8b;
+    }
+    .dm-proto-thumb {
+      width: 100%;
+      aspect-ratio: 800 / 220;
+      height: auto;
+      border: 1px solid #dadce0;
+      border-radius: 3px;
+      background: #fff;
+      image-rendering: pixelated;
+      display: block;
+    }
+    .dm-proto-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+      font-size: 0.68rem;
+      color: var(--text-secondary);
+      line-height: 1.2;
+    }
+    .dm-proto-badge {
+      font-family: 'Roboto Mono', monospace;
+      font-weight: 700;
+      font-size: 0.62rem;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: #e8eaed;
+      color: #3c4043;
+      flex-shrink: 0;
+    }
+    .dm-proto-badge.jump,
+    .dm-proto-badge.duck {
+      background: rgba(0, 127, 139, 0.14);
+      color: #007f8b;
+    }
+    .dm-proto-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       flex: 1;
-      min-width: 220px;
     }
   </style>
 </div>

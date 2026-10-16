@@ -162,6 +162,9 @@ test.describe('Decision Maker Task', () => {
     await expect(page.locator('#dm-mode-image')).toHaveClass(/active/);
     await expect(page.locator('#dm-scene-preview-wrap')).toBeVisible();
     await expect(page.locator('#dm-scene-canvas')).toBeVisible();
+    await expect(page.locator('#dm-scene-canvas')).toHaveAttribute('width', '800');
+    await expect(page.locator('#dm-scene-canvas')).toHaveAttribute('height', '220');
+    await expect(page.locator('#dm-proto-grid .dm-proto-card')).toHaveCount(15);
     await expect(page.locator('#dm-prompt')).toBeHidden();
 
     // Switch to Text State mode
@@ -169,5 +172,6 @@ test.describe('Decision Maker Task', () => {
     await expect(page.locator('#dm-mode-text')).toHaveClass(/active/);
     await expect(page.locator('#dm-prompt')).toBeVisible();
     await expect(page.locator('#dm-scene-preview-wrap')).toBeHidden();
+    await expect(page.locator('#dm-proto-section')).toBeHidden();
   });
 });
