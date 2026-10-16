@@ -30,8 +30,8 @@
 
 import template from '../templates/dino-game.html?raw';
 import { InferenceTimer } from '../components/inference-timer';
-import { decisionRuntime } from '../components/decision-runtime';
-import { mountDecisionModelPanel } from '../components/decision-model-panel';
+import { DECISION_MODELS, decisionRuntime } from '../components/decision-runtime';
+import { mountDecisionModelPanel, type DecisionModelPanelHandle } from '../components/decision-model-panel';
 
 // ---------------------------------------------------------------------------
 // Constants (all units are pixels and ticks; one tick = 1/60 s at 1x speed)
@@ -40,6 +40,11 @@ import { mountDecisionModelPanel } from '../components/decision-model-panel';
 const WIDTH = 800;
 const HEIGHT = 220;
 const GROUND_Y = 180;
+
+const SCENE_CROP_W = 160;
+const SCENE_CROP_H = 100;
+const SCENE_CROP_GROUND_Y = 84;
+const SCENE_CROP_BIRD_BOTTOM = 24;
 
 const DINO_X = 60;
 const DINO_W = 24;
@@ -58,21 +63,29 @@ const ACCELERATION = 0.001;
 
 const TICK_MS = 1000 / 60;
 
+export type InputMode = 'image' | 'text';
+
 /**
- * Time the model gets to answer: an obstacle comes into view only this many
- * ticks before the dino must start its jump (6 ticks = 100 ms at 1x).
+ * Time the model gets to answer: an obstacle comes into view this many ticks
+ * before the dino must start its jump (14 ticks = ~233 ms for WebGPU vision,
+ * 6 ticks = 100 ms for text).
  */
-const DECISION_BUDGET_TICKS = 6;
+const DECISION_BUDGET_TICKS_IMAGE = 14;
+const DECISION_BUDGET_TICKS_TEXT = 6;
+
+function budgetTicksForMode(mode: InputMode): number {
+  return mode === 'image' ? DECISION_BUDGET_TICKS_IMAGE : DECISION_BUDGET_TICKS_TEXT;
+}
 
 /** The model is asked about the next obstacle once it is this close (grows with speed). */
-function lookDistance(speed: number): number {
-  return speed * (APEX_TIME + DECISION_BUDGET_TICKS);
+function lookDistance(speed: number, mode: InputMode = 'image'): number {
+  return speed * (APEX_TIME + budgetTicksForMode(mode));
 }
 /** Start ducking this many ticks before a flying obstacle reaches the dino. */
 const DUCK_LEAD_TICKS = 6;
 
 /** Flying obstacles: between ducking height and standing head height. */
-const BIRD_BOTTOM = 18;
+const BIRD_BOTTOM = 22;
 
 /**
  * The Choice question asked about the scene text. This wording was picked
@@ -212,10 +225,10 @@ function createWorld(): World {
   };
 }
 
-function observe(world: World): Observation {
+function observe(world: World, mode: InputMode = 'image'): Observation {
   const next = world.obstacles.find((o) => !o.passed);
   const distance = next ? Math.max(0, next.x - (DINO_X + DINO_W)) : null;
-  const visible = next && distance! <= lookDistance(world.speed);
+  const visible = next && distance! <= lookDistance(world.speed, mode);
   return {
     onGround: world.dinoY === 0,
     speed: world.speed,
@@ -352,10 +365,10 @@ function drawSprite(ctx: CanvasRenderingContext2D, rows: string[], x: number, y:
 }
 
 /** A black pixel-art cactus (trunk + two arms) at x with the given size. */
-function drawCactus(ctx: CanvasRenderingContext2D, x: number, width: number, height: number) {
+function drawCactus(ctx: CanvasRenderingContext2D, x: number, width: number, height: number, groundY = GROUND_Y) {
   const cols = Math.max(5, Math.round(width / PIXEL));
   const rows = Math.round(height / PIXEL);
-  const top = GROUND_Y - rows * PIXEL;
+  const top = groundY - rows * PIXEL;
   const px = (c: number, r: number, w: number, h: number) =>
     ctx.fillRect(x + c * PIXEL, top + r * PIXEL, w * PIXEL, h * PIXEL);
 
@@ -382,8 +395,16 @@ function drawCactus(ctx: CanvasRenderingContext2D, x: number, width: number, hei
   arm(cols - armW, Math.round(rows * 0.18), Math.round(rows * 0.48), trunkL + trunkW, cols - armW);
 }
 
-function drawObstacle(ctx: CanvasRenderingContext2D, o: Obstacle, tick: number) {
+function drawObstacle(
+  ctx: CanvasRenderingContext2D,
+  o: Obstacle,
+  tick: number,
+  groundY = GROUND_Y,
+  birdBottom = BIRD_BOTTOM,
+  overrideX?: number
+) {
   const k = o.kind;
+  const drawX = overrideX ?? o.x;
   if (k.flying) {
     const frame = BIRD_FRAMES[Math.floor(tick / 10) % 2];
     ctx.save();
@@ -392,7 +413,7 @@ function drawObstacle(ctx: CanvasRenderingContext2D, o: Obstacle, tick: number) 
       for (let c = 0; c < row.length; c++) {
         if (row[c] === '.') continue;
         ctx.fillStyle = OBSTACLE_COLOR;
-        ctx.fillRect(o.x + c * PIXEL, GROUND_Y - BIRD_BOTTOM - k.height + r * PIXEL, PIXEL, PIXEL);
+        ctx.fillRect(drawX + c * PIXEL, groundY - birdBottom - k.height + r * PIXEL, PIXEL, PIXEL);
       }
     });
     ctx.restore();
@@ -403,8 +424,39 @@ function drawObstacle(ctx: CanvasRenderingContext2D, o: Obstacle, tick: number) 
   for (let i = 0; i < n; i++) {
     // Vary heights a little within a group.
     const h = k.height - (i % 2) * 6;
-    drawCactus(ctx, o.x + i * each, each, h);
+    drawCactus(ctx, drawX + i * each, each, h, groundY);
   }
+}
+
+/**
+ * Renders the 160x100 lookahead scene crop in front of the dino.
+ * Contains the ground line and any obstacle inside the camera window at its
+ * live horizontal position (moving right-to-left as the dino runs), with no
+ * text labels, no UI chrome, and no dino.
+ */
+function renderSceneCropCanvas(canvas: HTMLCanvasElement, w: World, mode: InputMode) {
+  const sctx = canvas.getContext('2d')!;
+  sctx.fillStyle = '#ffffff';
+  sctx.fillRect(0, 0, SCENE_CROP_W, SCENE_CROP_H);
+
+  // Clean horizontal ground line.
+  sctx.fillStyle = DINO_COLOR;
+  sctx.fillRect(0, SCENE_CROP_GROUND_Y, SCENE_CROP_W, 2);
+
+  const camStart = DINO_X + DINO_W;
+  const camSpan = lookDistance(w.speed, mode) * 1.3;
+  for (const o of w.obstacles) {
+    const relX = o.x - camStart;
+    if (relX + o.kind.width < 0 || relX > camSpan) continue;
+    const drawX = Math.round((relX / camSpan) * (SCENE_CROP_W - o.kind.width - 16)) + 8;
+    drawObstacle(sctx, o, w.tick, SCENE_CROP_GROUND_Y, SCENE_CROP_BIRD_BOTTOM, drawX);
+  }
+}
+
+async function canvasToJpegBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.95));
+  if (!blob) return new Uint8Array(0);
+  return new Uint8Array(await blob.arrayBuffer());
 }
 
 /** Ground line with scrolling pebbles. */
@@ -432,6 +484,7 @@ class DinoGameTask {
   /** The model's current decision about what's ahead; performed by the game when timing is right. */
   private plan: Decision = { action: 'WAIT', reason: 'Press Play or Next Step.', target: null };
   private modelCalls = 0;
+  private inputMode: InputMode = 'image';
 
   private running = false;
   private busy = false;
@@ -443,8 +496,10 @@ class DinoGameTask {
   private simSpeed = 1;
   private pauseOnDecision = true;
   private disposers: (() => void)[] = [];
+  private modelPanelHandle?: DecisionModelPanelHandle;
 
   private ctx!: CanvasRenderingContext2D;
+  private sceneCanvas!: HTMLCanvasElement;
   private el: Record<string, HTMLElement> = {};
 
   constructor(private container: HTMLElement) {}
@@ -466,6 +521,9 @@ class DinoGameTask {
     this.ctx = canvas.getContext('2d')!;
     this.ctx.scale(dpr, dpr);
 
+    this.sceneCanvas = this.el['dm-scene-canvas'] as HTMLCanvasElement;
+    renderSceneCropCanvas(this.sceneCanvas, this.world, this.inputMode);
+
     this.el['dm-play'].addEventListener('click', () => this.setRunning(!this.running));
     this.el['dm-step'].addEventListener('click', () => this.step());
     this.el['dm-reset'].addEventListener('click', () => this.reset());
@@ -476,10 +534,13 @@ class DinoGameTask {
     this.el['dm-pause-on-decision'].addEventListener('change', (e) => {
       this.pauseOnDecision = (e.target as HTMLInputElement).checked;
     });
+    this.el['dm-mode-image']?.addEventListener('click', () => this.setInputMode('image'));
+    this.el['dm-mode-text']?.addEventListener('click', () => this.setInputMode('text'));
     window.addEventListener('keydown', this.onKeyDown);
 
     // Model controls and state are shared with the Decision Maker page.
-    this.disposers.push(mountDecisionModelPanel(this.el['dm-model-panel']));
+    this.modelPanelHandle = mountDecisionModelPanel(this.el['dm-model-panel'], 'vision');
+    this.disposers.push(this.modelPanelHandle);
     this.disposers.push(
       decisionRuntime.subscribe((event) => {
         if (event.type === 'loading') {
@@ -501,15 +562,76 @@ class DinoGameTask {
       })
     );
 
+    this.syncInputModeUI();
     this.render();
     this.updatePanel();
     this.inferenceTimer.mount();
+
     if (decisionRuntime.ready) {
-      this.refreshPlan();
+      if (this.inputMode === 'image' && !this.isLoadedModelVisionCapable()) {
+        decisionRuntime.select('embeddinggemma2_text_vision_440m');
+        this.modelPanelHandle?.setModality('vision');
+        void decisionRuntime.load();
+      } else {
+        this.refreshPlan();
+      }
     } else if (decisionRuntime.loading) {
       this.setStatus(`Loading ${decisionRuntime.loadingLabel}...`);
     } else {
-      this.setStatus('Load a model to begin');
+      this.setStatus('Load a vision model to begin');
+    }
+  }
+
+  private isLoadedModelVisionCapable(): boolean {
+    if (!decisionRuntime.ready) return false;
+    if (decisionRuntime.customModel) return true;
+    return Boolean(decisionRuntime.loadedValue && DECISION_MODELS[decisionRuntime.loadedValue]?.supportsVision);
+  }
+
+  private setInputMode(mode: InputMode) {
+    if (this.inputMode === mode) return;
+    this.setRunning(false);
+    this.epoch++;
+    this.inFlight = false;
+    this.inputMode = mode;
+    this.modelPanelHandle?.setModality(mode === 'image' ? 'vision' : 'text');
+    this.syncInputModeUI();
+    this.render();
+    this.updatePanel();
+
+    if (mode === 'image' && decisionRuntime.ready && !this.isLoadedModelVisionCapable()) {
+      decisionRuntime.select('embeddinggemma2_text_vision_440m');
+      this.modelPanelHandle?.setModality('vision');
+      void decisionRuntime.load();
+      return;
+    }
+    if (decisionRuntime.ready) {
+      void this.refreshPlan();
+    }
+  }
+
+  private syncInputModeUI() {
+    const isImage = this.inputMode === 'image';
+    this.el['dm-mode-image']?.classList.toggle('active', isImage);
+    this.el['dm-mode-text']?.classList.toggle('active', !isImage);
+    if (this.el['dm-help']) {
+      this.el['dm-help'].innerHTML = isImage
+        ? 'When something new enters the lookahead zone, the game captures a <b>160×100 image crop</b> of the scene ahead (with no text labels) and sends those pixels to <code>DecisionMaker</code> to choose: <b>jump</b>, <b>duck</b>, or <b>wait</b>.'
+        : 'The model never sees the game. When something new comes into view, it gets a one-line text description and makes a Choice: <b>jump</b>, <b>duck</b>, or <b>wait</b>.';
+    }
+    if (this.el['dm-input-label']) {
+      this.el['dm-input-label'].textContent = isImage
+        ? 'Model input (160×100 scene image crop)'
+        : 'Model input (scene text description)';
+    }
+    if (this.el['dm-input-badge']) {
+      this.el['dm-input-badge'].textContent = isImage ? 'Vision · { imageBytes }' : 'Text · string';
+    }
+    if (this.el['dm-scene-preview-wrap']) {
+      this.el['dm-scene-preview-wrap'].style.display = isImage ? 'flex' : 'none';
+    }
+    if (this.el['dm-prompt']) {
+      this.el['dm-prompt'].style.display = isImage ? 'none' : 'block';
     }
   }
 
@@ -532,10 +654,44 @@ class DinoGameTask {
     return this.plan.target !== (obs.target?.id ?? null) || (this.plan.thinking === true && !this.inFlight);
   }
 
-  /** Asks the model about the scene: one Choice call. */
+  /** Asks the model about the scene: one Choice call (either image crop or text state). */
   private async modelDecide(obs: Observation): Promise<Decision> {
     const target = obs.target?.id ?? null;
     if (!decisionRuntime.ready) return { action: 'WAIT', reason: 'Model not ready.', target };
+
+    if (this.inputMode === 'image') {
+      if (!this.isLoadedModelVisionCapable()) {
+        return { action: 'WAIT', reason: 'Select and load a vision-capable model (440M or 740M).', target };
+      }
+      renderSceneCropCanvas(this.sceneCanvas, this.world, this.inputMode);
+      const imageBytes = await canvasToJpegBytes(this.sceneCanvas);
+      if (this.el['dm-scene-caption']) {
+        this.el['dm-scene-caption'].textContent = `160×100 JPEG · ${(imageBytes.byteLength / 1024).toFixed(1)} KB`;
+      }
+      this.modelCalls++;
+      const msg = await decisionRuntime.ask({ imageBytes }, 'choice', DINO_QUESTION);
+      if (msg.type !== 'DECIDE_RESULT') {
+        return { action: 'WAIT', reason: `Model error: ${msg.error}`, target };
+      }
+      const { selectedKey, probabilities } = msg.result as {
+        selectedKey: string;
+        probabilities: Record<string, number>;
+      };
+      this.inferenceTimer.record(msg.inferenceTime, 'GPU');
+      const action = (selectedKey?.toUpperCase() as Action) ?? 'WAIT';
+      const probs = Object.fromEntries(ACTIONS.map((a) => [a, probabilities?.[a.toLowerCase()] ?? 0])) as Record<
+        Action,
+        number
+      >;
+      const what = obs.target ? `“${obs.target.kind.name}” sprite` : 'empty ground';
+      return {
+        action: ACTIONS.includes(action) ? action : 'WAIT',
+        reason: `Model saw ${what} in scene image → ${selectedKey} (${Math.round(probs[action] * 100)}%).`,
+        target,
+        probabilities: probs,
+        inferenceTime: msg.inferenceTime,
+      };
+    }
 
     const prompt = describe(obs);
     this.modelCalls++;
@@ -546,7 +702,7 @@ class DinoGameTask {
       selectedKey: string;
       probabilities: Record<string, number>;
     };
-    this.inferenceTimer.recordSingle(msg.inferenceTime);
+    this.inferenceTimer.record(msg.inferenceTime, 'GPU');
     const action = (selectedKey?.toUpperCase() as Action) ?? 'WAIT';
     const probs = Object.fromEntries(ACTIONS.map((a) => [a, probabilities?.[a.toLowerCase()] ?? 0])) as Record<
       Action,
@@ -588,7 +744,7 @@ class DinoGameTask {
     if (this.busy) return;
     this.busy = true;
     try {
-      this.plan = await this.modelDecide(observe(this.world));
+      this.plan = await this.modelDecide(observe(this.world, this.inputMode));
     } finally {
       this.busy = false;
     }
@@ -645,13 +801,22 @@ class DinoGameTask {
   /** One tick while playing (never waits for the model). */
   private tick() {
     if (this.busy || !this.canStep()) return;
-    stepWorld(this.world, controls(observe(this.world), this.plan), this.rand);
+    stepWorld(this.world, controls(observe(this.world, this.inputMode), this.plan), this.rand);
 
-    const obs = observe(this.world);
+    const obs = observe(this.world, this.inputMode);
     if (this.needsDecision(obs)) {
       const target = obs.target?.id ?? null;
-      if (target !== this.plan.target)
-        this.plan = { action: 'WAIT', reason: 'Model is reading what’s ahead…', target, thinking: true };
+      if (target !== this.plan.target) {
+        if (this.inputMode === 'image') {
+          renderSceneCropCanvas(this.sceneCanvas, this.world, this.inputMode);
+        }
+        this.plan = {
+          action: 'WAIT',
+          reason: this.inputMode === 'image' ? 'Model is inspecting scene image…' : 'Model is reading what’s ahead…',
+          target,
+          thinking: true,
+        };
+      }
       if (!this.inFlight) this.askModelInBackground(obs);
     }
 
@@ -665,8 +830,8 @@ class DinoGameTask {
     if (this.running || this.busy || !this.canStep()) return;
     this.busy = true;
     try {
-      stepWorld(this.world, controls(observe(this.world), this.plan), this.rand);
-      const obs = observe(this.world);
+      stepWorld(this.world, controls(observe(this.world, this.inputMode), this.plan), this.rand);
+      const obs = observe(this.world, this.inputMode);
       if (this.needsDecision(obs)) this.plan = await this.modelDecide(obs);
     } finally {
       this.busy = false;
@@ -682,6 +847,7 @@ class DinoGameTask {
     this.world = createWorld();
     this.rand = mulberry32(Date.now());
     this.modelCalls = 0;
+    renderSceneCropCanvas(this.sceneCanvas, this.world, this.inputMode);
     await this.refreshPlan();
   }
 
@@ -732,28 +898,37 @@ class DinoGameTask {
   private render() {
     const ctx = this.ctx;
     const w = this.world;
-    const obs = observe(w);
+    const obs = observe(w, this.inputMode);
 
     ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
-    // The zone the model "looks" at: obstacles in here are described to it.
-    const look = lookDistance(w.speed);
+    // The zone the model "looks" at: obstacles in here are captured/described to it.
+    const look = lookDistance(w.speed, this.inputMode);
+    const zoneW = this.inputMode === 'image' ? look * 1.3 : look;
     ctx.fillStyle = 'rgba(0, 127, 139, 0.06)';
-    ctx.fillRect(DINO_X + DINO_W, 20, look, GROUND_Y - 20);
+    ctx.fillRect(DINO_X + DINO_W, 20, zoneW, GROUND_Y - 20);
     ctx.strokeStyle = 'rgba(0, 127, 139, 0.5)';
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
-    ctx.moveTo(DINO_X + DINO_W + look, 20);
-    ctx.lineTo(DINO_X + DINO_W + look, GROUND_Y);
+    ctx.moveTo(DINO_X + DINO_W + zoneW, 20);
+    ctx.lineTo(DINO_X + DINO_W + zoneW, GROUND_Y);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = '#007f8b';
     ctx.font = '11px Roboto, sans-serif';
-    const budgetMs = Math.round((DECISION_BUDGET_TICKS * TICK_MS) / this.simSpeed);
+    const budgetMs = Math.round((budgetTicksForMode(this.inputMode) * TICK_MS) / this.simSpeed);
     ctx.textAlign = 'right';
-    ctx.fillText('model looks here', DINO_X + DINO_W + look - 4, 32);
-    ctx.fillText(`${budgetMs} ms to decide`, DINO_X + DINO_W + look - 4, 45);
+    ctx.fillText(
+      this.inputMode === 'image' ? 'model camera looks here (160×100 crop)' : 'model looks here',
+      DINO_X + DINO_W + zoneW - 4,
+      32
+    );
+    ctx.fillText(`${budgetMs} ms to decide`, DINO_X + DINO_W + zoneW - 4, 45);
     ctx.textAlign = 'left';
+
+    if (this.sceneCanvas) {
+      renderSceneCropCanvas(this.sceneCanvas, w, this.inputMode);
+    }
 
     drawGround(ctx, w.scroll);
 
@@ -762,12 +937,21 @@ class DinoGameTask {
       drawObstacle(ctx, o, w.tick);
       const top = GROUND_Y - (o.kind.flying ? BIRD_BOTTOM : 0) - o.kind.height;
       const isTarget = obs.target?.id === o.id && this.plan.target === o.id;
-      const label = isTarget && !this.plan.thinking ? `${o.kind.name} → ${this.plan.action}` : o.kind.name;
-      ctx.font = `${isTarget ? 'bold ' : ''}11px Roboto, sans-serif`;
-      ctx.fillStyle = isTarget ? '#007f8b' : '#5f6368';
-      ctx.textAlign = 'center';
-      ctx.fillText(label, o.x + o.kind.width / 2, top - 6);
-      ctx.textAlign = 'left';
+      const label =
+        this.inputMode === 'image'
+          ? isTarget && !this.plan.thinking
+            ? `→ ${this.plan.action}`
+            : ''
+          : isTarget && !this.plan.thinking
+            ? `${o.kind.name} → ${this.plan.action}`
+            : o.kind.name;
+      if (label) {
+        ctx.font = `${isTarget ? 'bold ' : ''}11px Roboto, sans-serif`;
+        ctx.fillStyle = isTarget ? '#007f8b' : '#5f6368';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, o.x + o.kind.width / 2, top - 6);
+        ctx.textAlign = 'left';
+      }
     }
 
     // Dino (legs alternate every 6 ticks while running).

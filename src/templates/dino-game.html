@@ -23,6 +23,20 @@
     <div class="section-title">Settings</div>
     <div class="control-group">
       <div class="control-label">
+        <span>Scene Input Modality</span>
+      </div>
+      <div class="dm-mode-switch" role="group" aria-label="Scene input modality">
+        <button type="button" id="dm-mode-image" class="dm-mode-btn active">
+          <span class="material-icons">image</span><span>Scene Image</span>
+        </button>
+        <button type="button" id="dm-mode-text" class="dm-mode-btn">
+          <span class="material-icons">notes</span><span>Text State</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <div class="control-label">
         <span>Simulation Speed</span>
         <span id="dm-speed-value" class="value-badge">1x</span>
       </div>
@@ -50,10 +64,10 @@
     </div>
     <div class="viewport">
       <div id="dm-game-view" class="dm-view">
-        <p class="dm-help">
-          The model never sees the game. When something new comes into view, it gets a one-line text description and
-          makes a Choice: <b>jump</b>, <b>duck</b>, or <b>wait</b>. It has about 100 ms to answer before the dino must
-          move.
+        <p id="dm-help" class="dm-help">
+          When something new enters the lookahead zone, the game captures a <b>160×100 image crop</b> of the scene ahead
+          (with no text labels) and sends those pixels to <code>DecisionMaker</code> to choose: <b>jump</b>,
+          <b>duck</b>, or <b>wait</b>.
         </p>
         <canvas id="dm-canvas" class="dm-canvas"></canvas>
 
@@ -88,11 +102,22 @@
           </div>
 
           <div class="dm-card">
-            <div class="dm-label">Model input</div>
-            <div id="dm-prompt" class="dm-prompt">(model not called yet)</div>
-            <div class="dm-question">
-              <span class="dm-label">Choice</span> <span id="dm-question-text"></span>
-              <ul id="dm-options" class="dm-options"></ul>
+            <div class="dm-input-header">
+              <div class="dm-label" id="dm-input-label">Model input (160×100 scene image crop)</div>
+              <span id="dm-input-badge" class="dm-input-badge">Vision · { imageBytes }</span>
+            </div>
+            <div class="dm-input-body">
+              <div id="dm-scene-preview-wrap" class="dm-scene-preview-wrap">
+                <canvas id="dm-scene-canvas" width="160" height="100" class="dm-scene-canvas"></canvas>
+                <div id="dm-scene-caption" class="dm-scene-caption">Lookahead crop sent to model</div>
+              </div>
+              <div class="dm-input-details">
+                <div id="dm-prompt" class="dm-prompt" style="display: none">(model not called yet)</div>
+                <div class="dm-question">
+                  <span class="dm-label">Choice</span> <span id="dm-question-text"></span>
+                  <ul id="dm-options" class="dm-options"></ul>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -312,6 +337,87 @@
       border-radius: 6px;
       color: var(--text-main);
       margin-top: 6px;
+    }
+    .dm-mode-switch {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-top: 6px;
+    }
+    .dm-mode-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 7px 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-color);
+      background: var(--surface);
+      color: var(--text-secondary);
+      font-size: 0.82rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .dm-mode-btn .material-icons {
+      font-size: 16px;
+    }
+    .dm-mode-btn:hover {
+      border-color: var(--primary);
+      color: var(--text-main);
+    }
+    .dm-mode-btn.active {
+      background: rgba(0, 127, 139, 0.1);
+      border-color: var(--primary);
+      color: var(--primary);
+      font-weight: 600;
+    }
+    .dm-input-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .dm-input-badge {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(0, 127, 139, 0.1);
+      color: var(--primary);
+    }
+    .dm-input-body {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .dm-scene-preview-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .dm-scene-canvas {
+      width: 160px;
+      height: 100px;
+      border: 1.5px solid #007f8b;
+      border-radius: 6px;
+      background: #fff;
+      image-rendering: pixelated;
+      display: block;
+    }
+    .dm-scene-caption {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+    }
+    .dm-input-details {
+      flex: 1;
+      min-width: 220px;
     }
   </style>
 </div>
