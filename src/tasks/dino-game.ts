@@ -116,11 +116,11 @@ interface ObstacleKind {
 }
 
 const OBSTACLE_KINDS: ObstacleKind[] = [
-  { name: 'small cactus', flying: false, width: 18, height: 28 },
+  { name: 'small cactus', flying: false, width: 18, height: 30 },
   { name: 'cactus', flying: false, width: 18, height: 36 },
-  { name: 'tall cactus', flying: false, width: 18, height: 48 },
+  { name: 'tall cactus', flying: false, width: 18, height: 44 },
   { name: 'two cacti', flying: false, width: 38, height: 34, count: 2 },
-  { name: 'three cacti', flying: false, width: 58, height: 32, count: 3 },
+  { name: 'three cacti', flying: false, width: 58, height: 34, count: 3 },
   { name: 'bird', flying: true, width: 26, height: 16 },
   { name: 'pterodactyl', flying: true, width: 26, height: 16 },
 ];
@@ -531,15 +531,22 @@ function drawSprite(ctx: CanvasRenderingContext2D, rows: string[], x: number, y:
   });
 }
 
-/** A black pixel-art cactus (trunk + two arms) at x with the given size. */
-function drawCactus(ctx: CanvasRenderingContext2D, x: number, width: number, height: number, groundY = GROUND_Y) {
+/** A pixel-art cactus (trunk + two arms) at x with the given size. */
+function drawCactus(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  width: number,
+  height: number,
+  groundY = GROUND_Y,
+  color = OBSTACLE_COLOR
+) {
   const cols = Math.max(9, Math.round(width / PIXEL));
   const rows = Math.round(height / PIXEL);
   const top = groundY - rows * PIXEL;
   const px = (c: number, r: number, w: number, h: number) =>
     ctx.fillRect(x + c * PIXEL, top + r * PIXEL, w * PIXEL, h * PIXEL);
 
-  ctx.fillStyle = OBSTACLE_COLOR;
+  ctx.fillStyle = color;
 
   // Trunk with a rounded top.
   const trunkW = Math.max(3, Math.round(cols * 0.34));
@@ -568,7 +575,8 @@ function drawObstacle(
   tick: number,
   groundY = GROUND_Y,
   birdBottom = BIRD_BOTTOM,
-  overrideX?: number
+  overrideX?: number,
+  color = OBSTACLE_COLOR
 ) {
   const k = o.kind;
   const drawX = overrideX ?? o.x;
@@ -579,7 +587,7 @@ function drawObstacle(
     frame.forEach((row, r) => {
       for (let c = 0; c < row.length; c++) {
         if (row[c] === '.') continue;
-        ctx.fillStyle = OBSTACLE_COLOR;
+        ctx.fillStyle = color;
         ctx.fillRect(drawX + c * PIXEL, groundY - birdBottom - k.height + r * PIXEL, PIXEL, PIXEL);
       }
     });
@@ -592,9 +600,12 @@ function drawObstacle(
   for (let i = 0; i < n; i++) {
     // Vary heights a little within a group.
     const h = k.height - (i % 2) * 6;
-    drawCactus(ctx, drawX + i * (each + gap), each, h, groundY);
+    drawCactus(ctx, drawX + i * (each + gap), each, h, groundY, color);
   }
 }
+
+/** Flying obstacle altitude in the 800×220 full-scene vision view (`y ∈ [130, 146]`, cleanly above ground cacti `y ∈ [136, 180]`). */
+const FULL_SCENE_BIRD_BOTTOM = 34;
 
 /**
  * Renders the full 800×220 game scene (dino on the left, shaded near action
@@ -612,7 +623,7 @@ function renderFullSceneCanvas(
 
   // Shaded near lookahead action zone in front of the dino.
   const zoneX = DINO_X + DINO_W;
-  sctx.fillStyle = '#c8eaee';
+  sctx.fillStyle = '#afe6ee';
   sctx.fillRect(zoneX, 20, zoneW, GROUND_Y - 20);
   sctx.fillStyle = '#007f8b';
   sctx.fillRect(zoneX + zoneW, 20, 2, GROUND_Y - 20);
@@ -624,10 +635,13 @@ function renderFullSceneCanvas(
   // Dino on the left.
   drawSprite(sctx, [...DINO_BODY, ...DINO_LEGS.stand], DINO_X, GROUND_Y - DINO_H);
 
-  // All obstacles on the track (both near inside the action zone and far on the right).
+  // All obstacles on the track (near and primary approaching obstacles in dark
+  // `#141518`; distant horizon obstacles at `x > 500` in muted gray `#a0a0a0`
+  // to visually distinguish immediate vs. horizon threats).
   for (const o of obstacles) {
     if (o.x + o.kind.width < 0 || o.x >= WIDTH) continue;
-    drawObstacle(sctx, o, 0, GROUND_Y, BIRD_BOTTOM);
+    const color = o.x > 500 ? '#a0a0a0' : OBSTACLE_COLOR;
+    drawObstacle(sctx, o, 0, GROUND_Y, FULL_SCENE_BIRD_BOTTOM, undefined, color);
   }
 }
 
