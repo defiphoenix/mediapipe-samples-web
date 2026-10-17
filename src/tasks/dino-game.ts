@@ -20,11 +20,12 @@
  *
  * Supports two input modalities:
  * - Scene Image (Vision): captures the full 800×220 game scene (dino on the
- *   left, shaded near action zone, and all near & far obstacles on the track—
- *   with no text labels) and compares it against 12 encoded reference
- *   full-scene prototypes (`options[].imageBytes`) in DecisionMaker so the
- *   model can distinguish clear track vs. far obstacles (`wait`) vs. near
- *   ground/flying obstacles (`jump` / `duck`), including multi-obstacle scenes.
+ *   left, shaded near action zone, and all near & far obstacles at their
+ *   continuous track positions—with no text labels) and compares it against 6
+ *   canonical single-obstacle reference prototypes (`options[].imageBytes`) in
+ *   DecisionMaker so the model generalizes across clear track, far obstacles
+ *   (`wait`), near ground/flying obstacles (`jump` / `duck`), and multi-obstacle
+ *   scenes without enumerating combined states.
  * - Text State: describes what is ahead in words ("Low flying obstacle ahead:
  *   pterodactyl.") and asks a Choice question: jump, duck, or wait.
  */
@@ -42,8 +43,8 @@ const WIDTH = 800;
 const HEIGHT = 220;
 const GROUND_Y = 180;
 
-/** Width of the shaded near lookahead action zone in front of the dino ([84, 234]). */
-const FULL_SCENE_ZONE_W = 150;
+/** Width of the shaded near lookahead action zone in front of the dino ([84, 284]). */
+const FULL_SCENE_ZONE_W = 200;
 
 const DINO_X = 60;
 const DINO_W = 24;
@@ -65,11 +66,12 @@ export type InputMode = 'image' | 'text';
 
 /**
  * Lead ticks before the jump apex when an obstacle enters the near action zone.
- * In image mode, the simulation pauses physics while a GPU vision inference is
- * in flight so the model always inspects the obstacle squarely inside the near
- * action zone (~178px) and never misses its jump window.
+ * In image mode, `8.4` lead ticks triggers the background vision inference as
+ * the obstacle enters the near action zone (`x ≈ 215px`, ~13–21 ticks before
+ * the jump/duck point) so the dino keeps running smoothly while awaiting the
+ * worker's decision.
  */
-const DECISION_BUDGET_TICKS_IMAGE = 1;
+const DECISION_BUDGET_TICKS_IMAGE = 8.4;
 const DECISION_BUDGET_TICKS_TEXT = 6;
 
 function budgetTicksForMode(mode: InputMode): number {
@@ -142,99 +144,42 @@ interface ScenePrototypeSpec {
 }
 
 /**
- * 12 reference full-game scene prototypes (800×220) encoded as `options[].imageBytes`.
- * Keeping `k = 12` (`8 <= k <= 12`) ensures `EmbeddingDecisionBackend` uses raw
- * cosine similarity against the visual prototypes without high-K centroid
- * subtraction.
+ * 6 canonical single-obstacle full-game scene prototypes (800×220) encoded as
+ * `options[].imageBytes`. Every prototype contains at most 1 obstacle (zero
+ * multi-obstacle combinations); the vision model generalizes across obstacle
+ * sizes, counts, and multi-obstacle (near + far) scenes.
  */
 const SCENE_PROTOTYPE_SPECS: ScenePrototypeSpec[] = [
   { id: 'wait_clear', action: 'WAIT', shortTitle: 'clear track', obstacles: [] },
   {
     id: 'wait_far_cactus',
     action: 'WAIT',
-    shortTitle: 'far cactus',
+    shortTitle: 'far ground obstacle',
     obstacles: [{ kindName: 'cactus', x: 420 }],
-  },
-  {
-    id: 'wait_far_two_cacti',
-    action: 'WAIT',
-    shortTitle: 'far 2 cacti',
-    obstacles: [{ kindName: 'two cacti', x: 420 }],
-  },
-  {
-    id: 'wait_far_three_cacti',
-    action: 'WAIT',
-    shortTitle: 'far 3 cacti',
-    obstacles: [{ kindName: 'three cacti', x: 420 }],
   },
   {
     id: 'wait_far_bird',
     action: 'WAIT',
-    shortTitle: 'far bird',
+    shortTitle: 'far flying obstacle',
     obstacles: [{ kindName: 'bird', x: 420 }],
   },
   {
-    id: 'jump_near_cactus_far_cactus',
+    id: 'jump_near_cactus',
     action: 'JUMP',
-    shortTitle: 'near cactus + far cactus',
-    obstacles: [
-      { kindName: 'cactus', x: 175 },
-      { kindName: 'cactus', x: 650 },
-    ],
+    shortTitle: 'near cactus',
+    obstacles: [{ kindName: 'cactus', x: 215 }],
   },
   {
-    id: 'jump_near_two_cacti_far_cactus',
+    id: 'jump_near_group',
     action: 'JUMP',
-    shortTitle: 'near 2 cacti + far cactus',
-    obstacles: [
-      { kindName: 'two cacti', x: 170 },
-      { kindName: 'cactus', x: 650 },
-    ],
+    shortTitle: 'near cactus group',
+    obstacles: [{ kindName: 'three cacti', x: 215 }],
   },
   {
-    id: 'jump_near_three_cacti_far_cactus',
-    action: 'JUMP',
-    shortTitle: 'near 3 cacti + far cactus',
-    obstacles: [
-      { kindName: 'three cacti', x: 165 },
-      { kindName: 'cactus', x: 650 },
-    ],
-  },
-  {
-    id: 'jump_near_cactus_far_bird',
-    action: 'JUMP',
-    shortTitle: 'near cactus + far bird',
-    obstacles: [
-      { kindName: 'cactus', x: 175 },
-      { kindName: 'bird', x: 650 },
-    ],
-  },
-  {
-    id: 'jump_near_three_cacti_far_bird',
-    action: 'JUMP',
-    shortTitle: 'near 3 cacti + far bird',
-    obstacles: [
-      { kindName: 'three cacti', x: 165 },
-      { kindName: 'bird', x: 650 },
-    ],
-  },
-  {
-    id: 'duck_near_bird_far_cactus',
+    id: 'duck_near_bird',
     action: 'DUCK',
-    shortTitle: 'near bird + far cactus',
-    obstacles: [
-      { kindName: 'bird', x: 175 },
-      { kindName: 'cactus', x: 650 },
-    ],
-  },
-  {
-    id: 'duck_near_bird_far_bird',
-    action: 'DUCK',
-    shortTitle: 'near bird + far bird',
-    obstacles: [
-      { kindName: 'bird', x: 175 },
-      { kindName: 'bird', x: 650 },
-    ],
+    shortTitle: 'near flying obstacle',
+    obstacles: [{ kindName: 'bird', x: 215 }],
   },
 ];
 
@@ -607,6 +552,19 @@ function drawObstacle(
 /** Flying obstacle altitude in the 800×220 full-scene vision view (`y ∈ [130, 146]`, cleanly above ground cacti `y ∈ [136, 180]`). */
 const FULL_SCENE_BIRD_BOTTOM = 34;
 
+let cachedHorizonMistZoneW = -1;
+let cachedHorizonMistData: ImageData | null = null;
+
+function getHorizonMistData(sctx: CanvasRenderingContext2D, zoneW: number): ImageData {
+  if (cachedHorizonMistData && cachedHorizonMistZoneW === zoneW) {
+    return cachedHorizonMistData;
+  }
+  const imgData = sctx.createImageData(WIDTH, HEIGHT);
+  cachedHorizonMistZoneW = zoneW;
+  cachedHorizonMistData = imgData;
+  return imgData;
+}
+
 /**
  * Renders the full 800×220 game scene (dino on the left, shaded near action
  * zone in front of the dino, ground line across the full width, and all
@@ -617,16 +575,17 @@ function renderFullSceneCanvas(
   obstacles: Array<{ kind: ObstacleKind; x: number }>,
   zoneW = FULL_SCENE_ZONE_W
 ) {
-  const sctx = canvas.getContext('2d')!;
+  const sctx = canvas.getContext('2d', { willReadFrequently: true })!;
   sctx.fillStyle = '#ffffff';
   sctx.fillRect(0, 0, WIDTH, HEIGHT);
 
   // Shaded near lookahead action zone in front of the dino.
   const zoneX = DINO_X + DINO_W;
+  const zoneEnd = zoneX + zoneW;
   sctx.fillStyle = '#afe6ee';
   sctx.fillRect(zoneX, 20, zoneW, GROUND_Y - 20);
   sctx.fillStyle = '#007f8b';
-  sctx.fillRect(zoneX + zoneW, 20, 2, GROUND_Y - 20);
+  sctx.fillRect(zoneEnd, 20, 2, GROUND_Y - 20);
 
   // Clean horizontal ground line across the full 800px scene.
   sctx.fillStyle = DINO_COLOR;
@@ -635,34 +594,45 @@ function renderFullSceneCanvas(
   // Dino on the left.
   drawSprite(sctx, [...DINO_BODY, ...DINO_LEGS.stand], DINO_X, GROUND_Y - DINO_H);
 
-  // All obstacles on the track (near and primary approaching obstacles in dark
-  // `#141518`; distant horizon obstacles at `x > 500` in muted gray `#a0a0a0`
-  // to visually distinguish immediate vs. horizon threats).
+  // Draw all obstacles on the track at their continuous positions.
   for (const o of obstacles) {
     if (o.x + o.kind.width < 0 || o.x >= WIDTH) continue;
-    const color = o.x > 500 ? '#a0a0a0' : OBSTACLE_COLOR;
-    drawObstacle(sctx, o, 0, GROUND_Y, FULL_SCENE_BIRD_BOTTOM, undefined, color);
+    drawObstacle(sctx, o, 0, GROUND_Y, FULL_SCENE_BIRD_BOTTOM, undefined, OBSTACLE_COLOR);
   }
+
+  // Atmospheric perspective / horizon mist over the far track (`x > zoneEnd + 2`):
+  // Light mist in the mid-track `[zoneEnd + 2, 460]` so approaching far obstacles
+  // remain clearly visible, ramping across `[460, 560]` into dense textured
+  // horizon mist at `x >= 560` so newly spawned distant obstacles do not
+  // overwhelm the near action zone in ViT patch LayerNorm.
+  const imgData = sctx.getImageData(0, 0, WIDTH, HEIGHT);
+  const data = imgData.data;
+  getHorizonMistData(sctx, zoneW);
+  for (let y = 20; y < GROUND_Y; y++) {
+    const yTile = Math.floor(y / 4);
+    for (let x = zoneEnd + 2; x < WIDTH; x++) {
+      const alpha = x <= 460 ? 0.2 : 0.2 + Math.min(1, (x - 460) / 100) * 0.8;
+      const fogVal = (Math.floor(x / 4) + yTile) % 2 === 0 ? 248 : 232;
+      const idx = (y * WIDTH + x) * 4;
+      data[idx] = Math.trunc(data[idx] * (1 - alpha) + fogVal * alpha);
+      data[idx + 1] = Math.trunc(data[idx + 1] * (1 - alpha) + fogVal * alpha);
+      data[idx + 2] = Math.trunc(data[idx + 2] * (1 - alpha) + fogVal * alpha);
+    }
+  }
+  sctx.putImageData(imgData, 0, 0);
 }
 
 /**
- * Renders the live world onto the 800×220 full-scene canvas, normalizing
- * horizontal distance relative to START_SPEED so obstacle positions remain
- * invariant as the game accelerates.
+ * Renders the live world onto the 800×220 full-scene canvas using each
+ * obstacle's continuous speed-normalized track coordinate (no coordinate
+ * snapping heuristics).
  */
 function renderFullSceneFromWorld(canvas: HTMLCanvasElement, w: World) {
-  const obs = observe(w, 'image');
-  const mappedObstacles: Array<{ kind: ObstacleKind; x: number }> = [];
-  if (obs.target) {
-    const nearX = obs.target.kind.width > 40 ? 165 : obs.target.kind.width > 30 ? 170 : 175;
-    mappedObstacles.push({ kind: obs.target.kind, x: nearX });
-    if (obs.farTarget) {
-      mappedObstacles.push({ kind: obs.farTarget.kind, x: 650 });
-    }
-  } else if (obs.farTarget) {
-    mappedObstacles.push({ kind: obs.farTarget.kind, x: 420 });
-  }
-  renderFullSceneCanvas(canvas, mappedObstacles, FULL_SCENE_ZONE_W);
+  const obstacles = w.obstacles
+    .filter((o) => !o.passed)
+    .map((o) => ({ kind: o.kind, x: normalizedSceneX(o.x, w.speed) }))
+    .filter((o) => o.x + o.kind.width > 0 && o.x < WIDTH);
+  renderFullSceneCanvas(canvas, obstacles, FULL_SCENE_ZONE_W);
 }
 
 async function canvasToJpegBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
@@ -711,12 +681,13 @@ class DinoGameTask {
   private epoch = 0;
   private inFlight = false;
   private simSpeed = 1;
-  private pauseOnDecision = true;
+  private pauseOnDecision = false;
   private disposers: (() => void)[] = [];
   private modelPanelHandle?: DecisionModelPanelHandle;
 
   private ctx!: CanvasRenderingContext2D;
   private sceneCanvas!: HTMLCanvasElement;
+  private evalCanvas!: HTMLCanvasElement;
   private el: Record<string, HTMLElement> = {};
   private protoCards = new Map<string, HTMLElement>();
   private imageQuestionPromise?: Promise<{
@@ -745,6 +716,9 @@ class DinoGameTask {
     this.ctx.scale(dpr, dpr);
 
     this.sceneCanvas = this.el['dm-scene-canvas'] as HTMLCanvasElement;
+    this.evalCanvas = document.createElement('canvas');
+    this.evalCanvas.width = WIDTH;
+    this.evalCanvas.height = HEIGHT;
     renderFullSceneFromWorld(this.sceneCanvas, this.world);
     this.mountPrototypeGrid();
     void this.ensureImageQuestion();
@@ -951,9 +925,11 @@ class DinoGameTask {
    * True if the scene state changed since the last decision (or a decision is
    * still pending). In Scene Image mode, we evaluate:
    * - 'clear' when no obstacles are on screen,
-   * - 'far:<id>' when an obstacle is on the far track (~480–560px) while the
-   *   near action zone is clear and the dino is on the ground, and
-   * - 'near:<id>' when an obstacle is squarely inside the near action zone (~175–190px).
+   * - 'far:<id>' when an obstacle is on the far mid-track (~410–425px) while
+   *   the near action zone is clear and the dino is on the ground, and
+   * - 'near:<id>' as soon as an obstacle enters the near lookahead window
+   *   (~215px, ~13–21 ticks before the jump/duck point) so inference completes
+   *   in the background while the dino continues running smoothly.
    */
   private needsDecision(obs: Observation): boolean {
     if (this.plan.thinking && !this.inFlight) return true;
@@ -962,7 +938,7 @@ class DinoGameTask {
     if (this.inputMode === 'image' && obs.sceneKey.startsWith('far:')) {
       if (!obs.onGround || !obs.farTarget) return false;
       const normX = normalizedSceneX(obs.farTarget.x, obs.speed);
-      return normX >= 390 && normX <= 435;
+      return normX >= 410 && normX <= 425;
     }
     return true;
   }
@@ -982,9 +958,10 @@ class DinoGameTask {
           sceneKey,
         };
       }
+      renderFullSceneFromWorld(this.evalCanvas, this.world);
       renderFullSceneFromWorld(this.sceneCanvas, this.world);
       const [imageBytes, imageQuestion] = await Promise.all([
-        canvasToJpegBytes(this.sceneCanvas),
+        canvasToJpegBytes(this.evalCanvas),
         this.ensureImageQuestion(),
       ]);
       if (this.el['dm-scene-caption']) {
@@ -1076,9 +1053,8 @@ class DinoGameTask {
   }
 
   /**
-   * Asks the model asynchronously in the worker. While `this.inFlight` is true
-   * in image mode, `tick()` holds physics so the obstacle stays at the exact
-   * scene position the model is evaluating.
+   * Asks the model asynchronously in the worker while the game loop and dino
+   * physics continue running uninterrupted.
    */
   private askModelInBackground(obs: Observation) {
     this.inFlight = true;
@@ -1086,8 +1062,15 @@ class DinoGameTask {
     this.modelDecide(obs).then((decision) => {
       this.inFlight = false;
       if (epoch !== this.epoch) return;
-      // Ignore answers about a scene state that is no longer current.
-      if (decision.sceneKey !== this.plan.sceneKey) return;
+      // If a newer scene state arrived while this inference was in flight,
+      // immediately kick off a decision for the latest scene state.
+      if (decision.sceneKey !== this.plan.sceneKey) {
+        const latestObs = observe(this.world, this.inputMode);
+        if (this.running && this.needsDecision(latestObs)) {
+          this.askModelInBackground(latestObs);
+        }
+        return;
+      }
       this.plan = decision;
       if (this.running && this.pauseOnDecision && decision.action !== 'WAIT') this.setRunning(false);
       this.render();
@@ -1103,7 +1086,7 @@ class DinoGameTask {
     if (this.inputMode === 'image' && this.modelCalls === 0) {
       this.plan = {
         action: 'WAIT',
-        reason: 'Prewarming 12 reference full-scene prototypes on GPU…',
+        reason: 'Prewarming 6 reference full-scene prototypes on GPU…',
         target: null,
         sceneKey: 'init',
         thinking: true,
@@ -1165,10 +1148,9 @@ class DinoGameTask {
     }
   }
 
-  /** One tick while playing. Holds physics while a vision model call is in flight. */
+  /** One tick while playing. Physics and dino movement run continuously while inference executes in the worker. */
   private tick() {
     if (this.busy || !this.canStep()) return;
-    if (this.inputMode === 'image' && this.inFlight) return;
 
     stepWorld(this.world, controls(observe(this.world, this.inputMode), this.plan), this.rand);
 
@@ -1176,9 +1158,6 @@ class DinoGameTask {
     if (this.needsDecision(obs)) {
       const target = obs.target?.id ?? null;
       if (obs.sceneKey !== this.plan.sceneKey) {
-        if (this.inputMode === 'image') {
-          renderFullSceneFromWorld(this.sceneCanvas, this.world);
-        }
         this.plan = {
           action: 'WAIT',
           reason:
@@ -1280,6 +1259,10 @@ class DinoGameTask {
     const ctx = this.ctx;
     const w = this.world;
     const obs = observe(w, this.inputMode);
+
+    if (this.inputMode === 'image' && this.sceneCanvas) {
+      renderFullSceneFromWorld(this.sceneCanvas, w);
+    }
 
     ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
