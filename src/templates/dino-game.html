@@ -65,7 +65,7 @@
     <div class="viewport">
       <div id="dm-game-view" class="dm-view">
         <p id="dm-help" class="dm-help">
-          The game captures the <b>full 800×220 game scene</b> (dino on the left, shaded near action zone, and all near
+          The game captures the <b>full 768×192 game scene</b> (dino on the left, shaded near action zone, and all near
           &amp; far obstacles on the track—with no text labels) and compares those pixels against encoded reference
           full-scene prototypes in <code>DecisionMaker</code> to choose: <b>jump</b>, <b>duck</b>, or <b>wait</b>.
         </p>
@@ -103,14 +103,14 @@
 
           <div class="dm-card">
             <div class="dm-input-header">
-              <div class="dm-label" id="dm-input-label">Model input (full 800×220 game scene)</div>
+              <div class="dm-label" id="dm-input-label">Model input (full 768×192 game scene)</div>
               <span id="dm-input-badge" class="dm-input-badge">Vision · { imageBytes }</span>
             </div>
             <div class="dm-input-body">
               <div id="dm-scene-preview-wrap" class="dm-scene-preview-wrap">
-                <canvas id="dm-scene-canvas" width="800" height="220" class="dm-scene-canvas"></canvas>
+                <canvas id="dm-scene-canvas" width="768" height="192" class="dm-scene-canvas"></canvas>
                 <div id="dm-scene-caption" class="dm-scene-caption">
-                  Full 800×220 scene sent to model (dino + near action zone + far track)
+                  Full 768×192 native-patch scene sent to model (dino + near action zone + far track)
                 </div>
               </div>
               <div class="dm-input-details">
@@ -411,7 +411,7 @@
     .dm-scene-canvas {
       width: 100%;
       max-width: 560px;
-      aspect-ratio: 800 / 220;
+      aspect-ratio: 768 / 192;
       height: auto;
       border: 1.5px solid #007f8b;
       border-radius: 6px;
@@ -460,7 +460,7 @@
     }
     .dm-proto-thumb {
       width: 100%;
-      aspect-ratio: 800 / 220;
+      aspect-ratio: 768 / 192;
       height: auto;
       border: 1px solid #dadce0;
       border-radius: 3px;
