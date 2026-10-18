@@ -65,9 +65,9 @@
     <div class="viewport">
       <div id="dm-game-view" class="dm-view">
         <p id="dm-help" class="dm-help">
-          The game captures the <b>full 768×192 game scene</b> (dino on the left, shaded near action zone, and all near
-          &amp; far obstacles on the track—with no text labels) and compares those pixels against encoded reference
-          full-scene prototypes in <code>DecisionMaker</code> to choose: <b>jump</b>, <b>duck</b>, or <b>wait</b>.
+          The game captures the <b>full 768×192 game scene</b> (dino on the left and all near &amp; far obstacles on the
+          track—with no text labels) and compares those pixels against 6 reference full-scene prototypes in
+          <code>DecisionMaker</code> to choose: <b>jump</b>, <b>duck</b>, <b>sprint</b>, or <b>wait</b>.
         </p>
         <canvas id="dm-canvas" class="dm-canvas"></canvas>
 
@@ -85,6 +85,11 @@
                 <span class="dm-label dm-prob-label">duck</span>
                 <div class="dm-prob-bar"><div id="dm-prob-DUCK" class="dm-prob-fill"></div></div>
                 <span id="dm-prob-value-DUCK" class="dm-prob-value">-</span>
+              </div>
+              <div class="dm-prob">
+                <span class="dm-label dm-prob-label">sprint</span>
+                <div class="dm-prob-bar"><div id="dm-prob-SPRINT" class="dm-prob-fill"></div></div>
+                <span id="dm-prob-value-SPRINT" class="dm-prob-value">-</span>
               </div>
               <div class="dm-prob">
                 <span class="dm-label dm-prob-label">wait</span>
@@ -110,7 +115,7 @@
               <div id="dm-scene-preview-wrap" class="dm-scene-preview-wrap">
                 <canvas id="dm-scene-canvas" width="768" height="192" class="dm-scene-canvas"></canvas>
                 <div id="dm-scene-caption" class="dm-scene-caption">
-                  Full 768×192 native-patch scene sent to model (dino + near action zone + far track)
+                  Full 768×192 native-patch scene sent to model (dino + near &amp; far obstacles)
                 </div>
               </div>
               <div class="dm-input-details">
@@ -260,6 +265,10 @@
       background: var(--primary);
       color: #fff;
     }
+    .dm-action.sprint {
+      background: #0b8043;
+      color: #fff;
+    }
     .dm-action.crash {
       background: #d93025;
       color: #fff;
@@ -274,7 +283,7 @@
       display: flex;
       flex-direction: column;
       gap: 4px;
-      width: 220px;
+      width: 230px;
     }
     .dm-prob {
       display: flex;
@@ -282,7 +291,7 @@
       gap: 8px;
     }
     .dm-prob-label {
-      width: 36px;
+      width: 44px;
     }
     .dm-prob-bar {
       flex: 1;
@@ -491,6 +500,10 @@
     .dm-proto-badge.duck {
       background: rgba(0, 127, 139, 0.14);
       color: #007f8b;
+    }
+    .dm-proto-badge.sprint {
+      background: rgba(11, 128, 67, 0.14);
+      color: #0b8043;
     }
     .dm-proto-title {
       overflow: hidden;
