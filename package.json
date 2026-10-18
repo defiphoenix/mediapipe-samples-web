@@ -5,9 +5,9 @@
   "type": "module",
   "packageManager": "pnpm@9.0.0",
   "scripts": {
-    "dev": "vite",
+    "dev": "node init && vite",
     "predev": "node copy-wasm.js",
-    "build": "tsc && vite build",
+    "build": "node init && tsc && vite build",
     "prebuild": "node copy-wasm.js",
     "preview": "vite preview",
     "test": "playwright test --project=chromium-gpu",
