@@ -56,9 +56,12 @@ const SCENE_WIDTH = 768;
 const SCENE_HEIGHT = 192;
 const SCENE_GROUND_Y = 164;
 const SCENE_ZONE_W = 196;
-const SCENE_PROTO_NEAR_X = 198;
+const SCENE_PROTO_NEAR_X = 196;
 const SCENE_PROTO_FAR_X = 404;
-const SCENE_NEAR_ENTRY_X = 200;
+const SCENE_NEAR_ENTRY_X = 198;
+const SCENE_BIRD_PIXEL = 3;
+const SCENE_MIST_START_X = 445;
+const SCENE_MIST_FULL_X = 496;
 
 const DINO_X = 60;
 const DINO_W = 24;
@@ -308,7 +311,8 @@ function createWorld(): World {
 function normalizedSceneX(worldX: number, speed: number): number {
   const zoneX = DINO_X + DINO_W;
   const scale = (SCENE_NEAR_ENTRY_X - zoneX) / lookDistance(speed, 'image');
-  return Math.round(zoneX + Math.max(0, worldX - zoneX) * scale);
+  const rawX = zoneX + Math.max(0, worldX - zoneX) * scale;
+  return Math.round((rawX - 0.01) / 4) * 4;
 }
 
 function observe(world: World, mode: InputMode = 'image'): Observation {
@@ -538,19 +542,21 @@ function drawObstacle(
   groundY = GROUND_Y,
   birdBottom = BIRD_BOTTOM,
   overrideX?: number,
-  color = OBSTACLE_COLOR
+  color = OBSTACLE_COLOR,
+  birdPixel = PIXEL
 ) {
   const k = o.kind;
   const drawX = overrideX ?? o.x;
   if (k.flying) {
     const frame = BIRD_FRAMES[Math.floor(tick / 10) % 2];
+    const birdH = frame.length * birdPixel;
     ctx.save();
     // Same sprite helper as the dino, but in the obstacle color.
     frame.forEach((row, r) => {
       for (let c = 0; c < row.length; c++) {
         if (row[c] === '.') continue;
         ctx.fillStyle = color;
-        ctx.fillRect(drawX + c * PIXEL, groundY - birdBottom - k.height + r * PIXEL, PIXEL, PIXEL);
+        ctx.fillRect(drawX + c * birdPixel, groundY - birdBottom - birdH + r * birdPixel, birdPixel, birdPixel);
       }
     });
     ctx.restore();
@@ -566,13 +572,19 @@ function drawObstacle(
   }
 }
 
-/** Flying obstacle altitude in the 768×192 full-scene vision view (`y ∈ [114, 130]`, cleanly above ground cacti `y ∈ [120, 164]`). */
+/** Flying obstacle altitude in the 768×192 full-scene vision view (`y ∈ [106, 130]`, cleanly above ground cacti `y ∈ [120, 164]`). */
 const FULL_SCENE_BIRD_BOTTOM = 34;
 const TGA_HEADER_BYTES = 18;
 
 let cachedBaseTgaBytes: Uint8Array | null = null;
 let cachedBaseSceneCanvas: HTMLCanvasElement | null = null;
 let cachedMistOverlayCanvas: HTMLCanvasElement | null = null;
+
+function farTrackMistAlpha(x: number): number {
+  if (x <= SCENE_MIST_START_X) return 0.2;
+  const span = Math.max(1, SCENE_MIST_FULL_X - SCENE_MIST_START_X);
+  return 0.2 + Math.min(1, (x - SCENE_MIST_START_X) / span) * 0.8;
+}
 
 /**
  * Builds and caches the static 768×192 24-bit uncompressed TGA buffer
@@ -638,7 +650,7 @@ function getBaseSceneTgaBytes(): Uint8Array {
   for (let y = 16; y < SCENE_GROUND_Y; y++) {
     const yTile = Math.floor(y / 4);
     for (let x = zoneEnd + 2; x < SCENE_WIDTH; x++) {
-      const alpha = x <= 445 ? 0.2 : 0.2 + Math.min(1, (x - 445) / 95) * 0.8;
+      const alpha = farTrackMistAlpha(x);
       const fogVal = (Math.floor(x / 4) + yTile) % 2 === 0 ? 248 : 232;
       const c = Math.trunc(255 * (1 - alpha) + fogVal * alpha);
       setPixel(x, y, c, c, c);
@@ -674,7 +686,7 @@ function renderFullSceneTgaBytes(
         let g = 33;
         let b = 36;
         if (inMistY && x >= zoneEnd + 2) {
-          const alpha = x <= 445 ? 0.2 : 0.2 + Math.min(1, (x - 445) / 95) * 0.8;
+          const alpha = farTrackMistAlpha(x);
           const fogVal = (Math.floor(x / 4) + yTile) % 2 === 0 ? 248 : 232;
           r = Math.trunc(r * (1 - alpha) + fogVal * alpha);
           g = Math.trunc(g * (1 - alpha) + fogVal * alpha);
@@ -714,6 +726,7 @@ function renderFullSceneTgaBytes(
   };
 
   const birdFrame = BIRD_FRAMES[0];
+  const birdH = birdFrame.length * SCENE_BIRD_PIXEL;
   for (const o of obstacles) {
     if (o.x + o.kind.width < 0 || o.x >= SCENE_WIDTH) continue;
     if (o.kind.flying) {
@@ -722,10 +735,10 @@ function renderFullSceneTgaBytes(
         for (let c = 0; c < row.length; c++) {
           if (row[c] === '.') continue;
           fillObsRect(
-            o.x + c * PIXEL,
-            SCENE_GROUND_Y - FULL_SCENE_BIRD_BOTTOM - o.kind.height + r * PIXEL,
-            PIXEL,
-            PIXEL
+            o.x + c * SCENE_BIRD_PIXEL,
+            SCENE_GROUND_Y - FULL_SCENE_BIRD_BOTTOM - birdH + r * SCENE_BIRD_PIXEL,
+            SCENE_BIRD_PIXEL,
+            SCENE_BIRD_PIXEL
           );
         }
       }
@@ -774,7 +787,7 @@ function getCachedSceneCanvases(): { baseCanvas: HTMLCanvasElement; mistCanvas: 
   for (let y = 16; y < SCENE_GROUND_Y; y++) {
     const yTile = Math.floor(y / 4);
     for (let x = zoneEnd + 2; x < SCENE_WIDTH; x++) {
-      const alpha = x <= 445 ? 0.2 : 0.2 + Math.min(1, (x - 445) / 95) * 0.8;
+      const alpha = farTrackMistAlpha(x);
       const fogVal = (Math.floor(x / 4) + yTile) % 2 === 0 ? 248 : 232;
       const idx = (y * SCENE_WIDTH + x) * 4;
       mistData[idx] = fogVal;
@@ -808,7 +821,7 @@ function renderFullSceneCanvas(
 
   for (const o of obstacles) {
     if (o.x + o.kind.width < 0 || o.x >= SCENE_WIDTH) continue;
-    drawObstacle(sctx, o, 0, SCENE_GROUND_Y, FULL_SCENE_BIRD_BOTTOM, undefined, OBSTACLE_COLOR);
+    drawObstacle(sctx, o, 0, SCENE_GROUND_Y, FULL_SCENE_BIRD_BOTTOM, undefined, OBSTACLE_COLOR, SCENE_BIRD_PIXEL);
   }
 
   sctx.drawImage(mistCanvas, 0, 0);
@@ -827,10 +840,6 @@ function getWorldSceneObstacles(w: World): Array<{ kind: ObstacleKind; x: number
  */
 function renderFullSceneFromWorld(canvas: HTMLCanvasElement, w: World) {
   renderFullSceneCanvas(canvas, getWorldSceneObstacles(w), SCENE_ZONE_W);
-}
-
-function renderFullSceneTgaFromWorld(w: World): Uint8Array {
-  return renderFullSceneTgaBytes(getWorldSceneObstacles(w), SCENE_ZONE_W);
 }
 
 /** Ground line with scrolling pebbles. */
@@ -881,7 +890,12 @@ class DinoGameTask {
   private sceneCanvas!: HTMLCanvasElement;
   private el: Record<string, HTMLElement> = {};
   private protoCards = new Map<string, HTMLElement>();
-  private pendingDecisionRequest?: { obs: Observation; snapshotTga?: Uint8Array };
+  private prototypesPrewarmed = false;
+  private pendingDecisionRequest?: {
+    obs: Observation;
+    snapshotTga?: Uint8Array;
+    snapshotObstacles?: Array<{ kind: ObstacleKind; x: number }>;
+  };
   private imageQuestionPromise?: Promise<{
     instructions: string;
     temperature: number;
@@ -936,6 +950,7 @@ class DinoGameTask {
           this.setRunning(false);
           this.epoch++;
           this.inFlight = false;
+          this.prototypesPrewarmed = false;
           this.inferenceTimer.resetRollingWindow();
         } else if (event.type === 'ready') {
           void this.refreshPlan();
@@ -1023,7 +1038,7 @@ class DinoGameTask {
           });
         }
         return {
-          instructions: DINO_TEXT_QUESTION.instructions,
+          instructions: '',
           temperature: 0.01,
           options,
         };
@@ -1046,6 +1061,9 @@ class DinoGameTask {
     this.inputMode = mode;
     this.modelPanelHandle?.setModality(mode === 'image' ? 'vision' : 'text');
     this.syncInputModeUI();
+    if (mode === 'image' && this.sceneCanvas) {
+      renderFullSceneFromWorld(this.sceneCanvas, this.world);
+    }
     this.render();
     this.updatePanel();
 
@@ -1066,8 +1084,13 @@ class DinoGameTask {
     this.el['dm-mode-text']?.classList.toggle('active', !isImage);
     if (this.el['dm-help']) {
       this.el['dm-help'].innerHTML = isImage
-        ? 'The game captures the <b>full 768×192 game scene</b> (dino on the left, shaded near action zone, and all near &amp; far obstacles on the track—with no text labels) and compares those pixels against encoded reference full-scene prototypes in <code>DecisionMaker</code> to choose: <b>jump</b>, <b>duck</b>, or <b>wait</b>.'
+        ? 'The game captures the <b>full 768×192 game scene</b> (dino on the left, shaded near action zone, and all near &amp; far obstacles on the track—with no text prompt or description) and compares those pixels against 6 reference full-scene prototypes in <code>DecisionMaker</code> to choose: <b>jump</b>, <b>duck</b>, or <b>wait</b>.'
         : 'The model never sees the game. When something new comes into view, it gets a one-line text description and makes a Choice: <b>jump</b>, <b>duck</b>, or <b>wait</b>.';
+    }
+    if (this.el['dm-question-text']) {
+      this.el['dm-question-text'].textContent = isImage
+        ? 'Pure image-to-image matching ({ imageBytes } only — no text prompt or scene description is sent to the model)'
+        : DINO_TEXT_QUESTION.instructions;
     }
     if (this.el['dm-input-label']) {
       this.el['dm-input-label'].textContent = isImage
@@ -1128,7 +1151,11 @@ class DinoGameTask {
   }
 
   /** Asks the model about the scene: one Choice call (either full-scene image or text state). */
-  private async modelDecide(obs: Observation, snapshotTga?: Uint8Array): Promise<Decision> {
+  private async modelDecide(
+    obs: Observation,
+    snapshotTga?: Uint8Array,
+    snapshotObstacles?: Array<{ kind: ObstacleKind; x: number }>
+  ): Promise<Decision> {
     const target = obs.target?.id ?? null;
     const sceneKey = obs.sceneKey;
     if (!decisionRuntime.ready) return { action: 'WAIT', reason: 'Model not ready.', target, sceneKey };
@@ -1142,8 +1169,11 @@ class DinoGameTask {
           sceneKey,
         };
       }
-      renderFullSceneFromWorld(this.sceneCanvas, this.world);
-      const imageBytes = snapshotTga ?? renderFullSceneTgaFromWorld(this.world);
+      const sceneObstacles = snapshotObstacles ?? getWorldSceneObstacles(this.world);
+      if (this.sceneCanvas) {
+        renderFullSceneCanvas(this.sceneCanvas, sceneObstacles, SCENE_ZONE_W);
+      }
+      const imageBytes = snapshotTga ?? renderFullSceneTgaBytes(sceneObstacles, SCENE_ZONE_W);
       const imageQuestion = await this.ensureImageQuestion();
       if (this.el['dm-scene-caption']) {
         this.el['dm-scene-caption'].textContent =
@@ -1158,7 +1188,10 @@ class DinoGameTask {
         selectedKey: string;
         probabilities: Record<string, number>;
       };
-      this.inferenceTimer.record(msg.inferenceTime, 'GPU');
+      if (this.prototypesPrewarmed) {
+        this.inferenceTimer.record(msg.inferenceTime, 'GPU');
+      }
+      this.prototypesPrewarmed = true;
 
       // Aggregate prototype probabilities by action class using max-pooling so
       // classes with more reference prototypes are not artificially boosted.
@@ -1237,10 +1270,14 @@ class DinoGameTask {
    * Asks the model asynchronously in the worker while the game loop and dino
    * physics continue running uninterrupted.
    */
-  private askModelInBackground(req: { obs: Observation; snapshotTga?: Uint8Array }) {
+  private askModelInBackground(req: {
+    obs: Observation;
+    snapshotTga?: Uint8Array;
+    snapshotObstacles?: Array<{ kind: ObstacleKind; x: number }>;
+  }) {
     this.inFlight = true;
     const epoch = this.epoch;
-    this.modelDecide(req.obs, req.snapshotTga).then((decision) => {
+    this.modelDecide(req.obs, req.snapshotTga, req.snapshotObstacles).then((decision) => {
       this.inFlight = false;
       if (epoch !== this.epoch) return;
       // If a newer scene state arrived while this inference was in flight,
@@ -1342,8 +1379,9 @@ class DinoGameTask {
     if (this.needsDecision(obs)) {
       const target = obs.target?.id ?? null;
       if (obs.sceneKey !== this.plan.sceneKey) {
-        const snapshotTga = this.inputMode === 'image' ? renderFullSceneTgaFromWorld(this.world) : undefined;
-        this.pendingDecisionRequest = { obs, snapshotTga };
+        const snapshotObstacles = this.inputMode === 'image' ? getWorldSceneObstacles(this.world) : undefined;
+        const snapshotTga = snapshotObstacles ? renderFullSceneTgaBytes(snapshotObstacles, SCENE_ZONE_W) : undefined;
+        this.pendingDecisionRequest = { obs, snapshotTga, snapshotObstacles };
         this.plan = {
           action: 'WAIT',
           reason:
@@ -1354,9 +1392,11 @@ class DinoGameTask {
         };
       }
       if (!this.inFlight) {
+        const snapshotObstacles = this.inputMode === 'image' ? getWorldSceneObstacles(this.world) : undefined;
         const req = this.pendingDecisionRequest ?? {
           obs,
-          snapshotTga: this.inputMode === 'image' ? renderFullSceneTgaFromWorld(this.world) : undefined,
+          snapshotObstacles,
+          snapshotTga: snapshotObstacles ? renderFullSceneTgaBytes(snapshotObstacles, SCENE_ZONE_W) : undefined,
         };
         this.pendingDecisionRequest = undefined;
         this.askModelInBackground(req);
@@ -1453,10 +1493,6 @@ class DinoGameTask {
     const ctx = this.ctx;
     const w = this.world;
     const obs = observe(w, this.inputMode);
-
-    if (this.inputMode === 'image' && this.sceneCanvas) {
-      renderFullSceneFromWorld(this.sceneCanvas, w);
-    }
 
     ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
